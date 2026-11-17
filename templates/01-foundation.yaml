@@ -127,7 +127,10 @@ Resources:                                                  # Everything this st
             Condition:                                      # Narrow who may assume
               StringEquals:                                 # Exact match
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com  # Token meant for AWS
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/heads/${AppBranch}  # This repo + branch only
+              StringLike:                                   # This repo + branch only, in either GitHub subject format
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/heads/${AppBranch}      # Classic: repo:owner/repo:ref:...
+                  - !Sub repo:${GitHubOrg}@*/${AppRepo}@*:ref:refs/heads/${AppBranch}  # Immutable: repo:owner@<id>/repo@<id>:ref:... (new repos)
       ManagedPolicyArns:                                    # Managed policies (no inline "Policies:")
         - !Ref EcrPushPolicy                                # ECR push only
       Tags:                                                 # Resource tags
