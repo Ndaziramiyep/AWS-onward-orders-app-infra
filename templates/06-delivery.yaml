@@ -279,6 +279,13 @@ Resources:                                                  # Everything this st
               - ecs:DescribeTaskDefinition                  # Read it back
               - ecs:DescribeServices                        # Read service state
             Resource: "*"                                   # These actions have no resource-level control
+          - Sid: TagTaskDefinitions                         # The deploy action registers task definitions WITH tags
+            Effect: Allow                                   # Allow
+            Action: ecs:TagResource                         # Needed when RegisterTaskDefinition carries tags
+            Resource: !Sub arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${ResourcePrefix}:*  # This family only
+            Condition:                                      # Only while registering, not retagging other resources
+              StringEquals:
+                ecs:CreateAction: RegisterTaskDefinition
           - Sid: PassOnlyTaskRolesToEcs                     # Allow handing the task roles to ECS
             Effect: Allow                                   # Grant
             Action: iam:PassRole                            # Pass role
