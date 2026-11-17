@@ -1,8 +1,0 @@
-# Keep the build context small and free of secrets
-.git
-.github
-tests
-**/__pycache__
-**/*.pyc
-.venv
-*.md
