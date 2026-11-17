@@ -16,7 +16,7 @@ Parameters:                                                 # Inputs supplied by
     Description: GitHub user or organisation that owns the application repository.
   AppRepo:                                                  # App repo name
     Type: String                                            # Text
-    Default: onward-orders-app                              # Repo that builds images
+    Default: AWS-onward-orders-app                              # Repo that builds images
     Description: Name of the application repository (the only repo allowed to push images).
   AppBranch:                                                # Branch allowed to push
     Type: String                                            # Text

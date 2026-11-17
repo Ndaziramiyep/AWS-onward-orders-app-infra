@@ -12,4 +12,4 @@ tags:                                   # Company-standard tags, applied by GitS
   Owner: patrick-ndaziramiye            # Accountable engineer
   CostCenter: amalitech-training        # Billing owner
   ManagedBy: cloudformation-gitsync     # How the resource is managed
-  Repository: onward-orders-infra       # Source repository
+  Repository: AWS-onward-orders-app-infra       # Source repository

@@ -9,7 +9,7 @@ set -euo pipefail                                         # Stop on any error, u
 REGION="${AWS_REGION:-eu-west-1}"                         # Target region
 PREFIX="${PREFIX:-onward-orders-lab}"                     # Naming prefix (matches templates)
 OWNER="${GITHUB_OWNER:-Ndaziramiyep}"                     # GitHub account that owns the infra repo
-REPO="${INFRA_REPO:-onward-orders-infra}"                 # Infra repo name
+REPO="${INFRA_REPO:-AWS-onward-orders-app-infra}"               # Infra repo name
 BRANCH="${BRANCH:-main}"                                  # Branch GitSync follows
 BOOTSTRAP_STACK="${PREFIX}-00-bootstrap"                  # Name of the one-time bootstrap stack
 

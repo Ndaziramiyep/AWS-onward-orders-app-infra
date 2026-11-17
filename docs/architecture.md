@@ -12,7 +12,7 @@ To rebuild all three, run `python docs/report-src/build_architecture_drawio.py`.
 
 ## Numbered flow of a change
 
-1. A developer merges to `main` in **onward-orders-app**. This is the only manual step.
+1. A developer merges to `main` in **AWS-onward-orders-app**. This is the only manual step.
 2. **GitHub Actions** runs the tests, then assumes `onward-orders-lab-github-actions-role` through **OIDC**. It gets temporary STS credentials, with no stored keys. It builds the image and pushes `:<sha>` (immutable) and `:latest` to **ECR**.
 3. ECR emits an **ECR Image Action PUSH** event for `latest`.
 4. The **EventBridge** rule starts **CodePipeline**. There is no polling.
@@ -23,4 +23,4 @@ To rebuild all three, run `python docs/report-src/build_architecture_drawio.py`.
 
 - The **ALB** is the only public resource. Tasks get no public IP, and private route tables have no `0.0.0.0/0` route. There is no NAT gateway.
 - Security groups are chained: `alb-sg` reaches `task-sg` on 8080 only. `task-sg` reaches `endpoint-sg` and the S3 prefix list on 443 only. `endpoint-sg` accepts 443 only from `task-sg`.
-- IAM uses managed policies only. The GitHub role is trusted only for `repo:Ndaziramiyep/onward-orders-app:ref:refs/heads/main`.
+- IAM uses managed policies only. The GitHub role is trusted only for `repo:Ndaziramiyep/AWS-onward-orders-app:ref:refs/heads/main`.

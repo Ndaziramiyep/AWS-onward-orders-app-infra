@@ -18,7 +18,7 @@ Parameters:                                                 # Inputs
     Default: Ndaziramiyep                                   # GitHub account
   AppRepo:                                                  # App repo name
     Type: String                                            # Text
-    Default: onward-orders-app                              # Holds appspec.yaml + taskdef.json
+    Default: AWS-onward-orders-app                              # Holds appspec.yaml + taskdef.json
   AppBranch:                                                # Branch to read specs from
     Type: String                                            # Text
     Default: main                                           # Released branch
