@@ -4,6 +4,7 @@ on:                                                       # When it runs
   push:                                                   # On push
     branches: [main]                                      # Only merges to main ship
   pull_request:                                           # PRs run tests only (no push, no AWS)
+  workflow_dispatch:                                      # Manual/scripted run on main (first image bootstrap)
 
 permissions:                                              # Token permissions
   id-token: write                                         # Required to request the OIDC token
@@ -31,7 +32,7 @@ jobs:                                                     # Jobs
 
   build-push:                                             # Build and push the image
     needs: test                                           # Only if tests pass
-    if: github.event_name == 'push'                       # Never from pull requests
+    if: github.event_name != 'pull_request'               # Never from pull requests (OIDC trust is main-only anyway)
     runs-on: ubuntu-latest                                # GitHub-hosted runner
     steps:                                                # Steps
       - uses: actions/checkout@v4                         # Get the code
