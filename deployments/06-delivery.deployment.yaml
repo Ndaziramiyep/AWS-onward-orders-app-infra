@@ -15,3 +15,4 @@ tags:                                   # Company-standard tags, applied by GitS
   CostCenter: amalitech-training        # Billing owner
   ManagedBy: cloudformation-gitsync     # How the resource is managed
   Repository: AWS-onward-orders-app-infra       # Source repository
+# GitSync initial sync 2026-11-17
