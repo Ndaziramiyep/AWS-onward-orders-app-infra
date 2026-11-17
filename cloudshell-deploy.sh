@@ -350,9 +350,18 @@ verify() {
   cluster="$(stack_out "$PREFIX-04-ecs" ClusterName)"
   service="$(stack_out "$PREFIX-04-ecs" ServiceName)"
 
+  # 'aws ecs wait services-stable' breaks on CODE_DEPLOY-controlled services, so poll the counts
   info "Waiting for the ECS service to be stable..."
-  aws ecs wait services-stable --cluster "$cluster" --services "$service" \
-    && ok "ECS service $service is stable" || warn "Service not stable yet - check ECS > $cluster > $service > Events"
+  local counts r d p stable=false
+  for _ in $(seq 1 40); do
+    counts="$(aws ecs describe-services --cluster "$cluster" --services "$service" \
+      --query 'services[0].[runningCount,desiredCount,pendingCount]' --output text)"
+    read -r r d p <<<"$counts"
+    if [[ "$d" -gt 0 && "$r" == "$d" && "$p" == 0 ]]; then stable=true; break; fi
+    sleep 15
+  done
+  $stable && ok "ECS service $service is stable ($r/$d running)" \
+          || warn "Service not stable yet ($counts running/desired/pending) - check ECS > $cluster > $service > Events"
 
   local running azs
   running="$(aws ecs describe-services --cluster "$cluster" --services "$service" \
