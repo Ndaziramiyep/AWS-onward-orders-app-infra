@@ -32,10 +32,40 @@ if [[ -z "$LINK_ID" || "$LINK_ID" == "None" ]]; then      # No link yet
 fi
 echo "Repository link: $LINK_ID"                          # Show the link ID
 
+section() {                                               # Prints "Key=Value" for each entry of a deployment-file section
+  awk -v sec="$1" '
+    $0 ~ "^"sec":" { on=1; next }                         # Section starts
+    /^[^ #]/       { on=0 }                               # Any other top-level key ends it
+    on && /^  [A-Za-z0-9]+:/ {
+      line=$0; sub(/[ \t]+#.*$/, "", line); sub(/^  /, "", line)   # Drop comment and indent
+      key=line; sub(/:.*/, "", key)                       # Key = text before the first colon
+      val=line; sub(/^[^:]*:[ \t]*/, "", val); gsub(/^"|"$/, "", val)  # Value, unquoted
+      print key "=" val
+    }' "$2"
+}
+
+create_stack_once() {                                     # GitSync only UPDATES stacks: create each stack once from
+  local stack="$1" file="$2" tpl params tags              # the same template, parameters and tags in its deployment file
+  tpl="$(awk '/^template-file-path:/ { sub(/[ \t]+#.*$/, ""); print $2 }' "$file")"
+  mapfile -t params < <(section parameters "$file")
+  mapfile -t tags < <(section tags "$file")
+  echo "Creating $stack from $tpl (GitSync manages every update after this)"
+  aws cloudformation deploy --region "$REGION" \
+    --stack-name "$stack" \
+    --template-file "$tpl" \
+    --role-arn "$ROLE_ARN" \
+    --capabilities CAPABILITY_NAMED_IAM \
+    --parameter-overrides "${params[@]}" \
+    --tags "${tags[@]}"                                   # Waits until the stack is created
+}
+
 for NAME in "$@"; do                                      # Each stack passed on the command line, in order
   STACK="${PREFIX}-${NAME}"                               # Stack name, e.g. onward-orders-lab-02-network
   FILE="deployments/${NAME}.deployment.yaml"              # Its GitSync deployment file
   [[ -f "$FILE" ]] || { echo "Missing $FILE"; exit 1; }   # Fail fast on typos
+  if ! aws cloudformation describe-stacks --region "$REGION" --stack-name "$STACK" >/dev/null 2>&1; then
+    create_stack_once "$STACK" "$FILE"                    # First time only
+  fi
   if aws codeconnections get-sync-configuration --region "$REGION" \
        --sync-type CFN_STACK_SYNC --resource-name "$STACK" >/dev/null 2>&1; then  # Already configured?
     echo "Sync configuration for $STACK already exists"   # Skip creation
