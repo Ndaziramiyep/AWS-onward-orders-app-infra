@@ -23,7 +23,7 @@ Full diagram with the numbered change flow: [docs/architecture.md](docs/architec
 
 ```bash
 git clone https://github.com/Ndaziramiyep/AWS-onward-orders-app-infra.git && cd AWS-onward-orders-app-infra
-export GITHUB_TOKEN=<classic PAT with scopes: repo, workflow>   # or you are prompted
+export GITHUB_TOKEN=<PAT: repo, workflow>   # optional for public repos, see below
 bash cloudshell-deploy.sh
 ```
 

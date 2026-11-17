@@ -22,7 +22,7 @@
 #
 # Usage (in AWS CloudShell):
 #   git clone https://github.com/<you>/AWS-onward-orders-app-infra.git && cd AWS-onward-orders-app-infra
-#   export GITHUB_TOKEN=<classic PAT with scopes: repo, workflow>   # or you will be prompted
+#   export GITHUB_TOKEN=<PAT: repo, workflow>   # optional for public repos (lets the script push/dispatch)
 #   bash cloudshell-deploy.sh            # full deploy (same as: deploy)
 #   bash cloudshell-deploy.sh publish    # only re-render and push both repos
 #   bash cloudshell-deploy.sh status     # stack status, URLs, last pipeline run
@@ -93,17 +93,20 @@ require_stack_ok() {
 }
 
 # ---------- GitHub helpers (token is only ever sent to github.com, never stored) -------------
+HAVE_TOKEN=false   # Set by github_login. Without a token, public repos are read anonymously.
 gh_api() {   # gh_api METHOD PATH [JSON]
-  local args=(-fsS -X "$1" -H "Authorization: Bearer $GITHUB_TOKEN"
-              -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+  local args=(-fsS -X "$1" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+  $HAVE_TOKEN && args+=(-H "Authorization: Bearer $GITHUB_TOKEN")
   [[ -n "${3:-}" ]] && args+=(-d "$3")
   curl "${args[@]}" "https://api.github.com$2"
 }
 gh_code() {  # HTTP status only
-  curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GITHUB_TOKEN" \
-    -H "Accept: application/vnd.github+json" "https://api.github.com$1"
+  local args=(-s -o /dev/null -w '%{http_code}' -H "Accept: application/vnd.github+json")
+  $HAVE_TOKEN && args+=(-H "Authorization: Bearer $GITHUB_TOKEN")
+  curl "${args[@]}" "https://api.github.com$1"
 }
 git_auth() { # git with the token injected per command (nothing written to .git/config)
+  if ! $HAVE_TOKEN; then git -c credential.helper= "$@"; return; fi
   local b64; b64="$(printf '%s:%s' "$GITHUB_LOGIN" "$GITHUB_TOKEN" | base64 -w0)"
   git -c credential.helper= -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $b64" "$@"
 }
@@ -129,10 +132,12 @@ preflight() {
 
 github_login() {
   if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-    echo "  A GitHub token is needed to create and push the two repos."
-    echo "  Classic PAT scopes: repo, workflow   (fine-grained: Administration, Contents, Workflows, Actions = RW)"
-    read -r -s -p "  GitHub token: " GITHUB_TOKEN </dev/tty; echo
+    GITHUB_LOGIN=""; GITHUB_OWNER="${GITHUB_OWNER:-$SRC_OWNER}"
+    ok "No GITHUB_TOKEN: reading public repos of $GITHUB_OWNER anonymously"
+    info "If a repo needs a change, the script stops and shows it, so you can push it yourself."
+    return
   fi
+  HAVE_TOKEN=true
   local me; me="$(gh_api GET /user)" || die "GitHub token rejected."
   GITHUB_LOGIN="$(jq -r .login <<<"$me")"
   GITHUB_OWNER="${GITHUB_OWNER:-$GITHUB_LOGIN}"
@@ -148,6 +153,7 @@ ensure_repo() {
   if [[ "$(gh_code "/repos/$GITHUB_OWNER/$name")" == 200 ]]; then
     ok "github.com/$GITHUB_OWNER/$name exists"; return
   fi
+  $HAVE_TOKEN || die "github.com/$GITHUB_OWNER/$name not found (or private). Create and push it, or export GITHUB_TOKEN."
   local private=false; [[ "$REPO_VISIBILITY" == private ]] && private=true
   local body; body="$(jq -nc --arg n "$name" --arg d "$desc" --argjson p "$private" \
     '{name:$n, description:$d, private:$p, auto_init:false}')"
@@ -170,6 +176,10 @@ publish_repo() {
   git -C "$dir" add -A
   if git -C "$dir" diff --cached --quiet; then
     PUSHED_NEW_COMMIT=false; ok "$name already has this account's values"
+  elif ! $HAVE_TOKEN; then
+    warn "$name needs these account-specific changes, and GitSync reads them from GitHub:"
+    git -C "$dir" --no-pager diff --cached
+    die "Make the changes above in your local clone of $name, push to $BRANCH, then re-run (or export GITHUB_TOKEN)."
   else
     git -C "$dir" -c user.name="$GITHUB_LOGIN" -c user.email="$GIT_EMAIL" \
       commit -q -m "chore: set account values for $ACCOUNT_ID / $REGION"
@@ -315,10 +325,13 @@ first_image() {
   publish_repo "$APP_REPO" render_app .github/workflows/build-push.yaml
   step "8. Wait for $PREFIX:latest in ECR"
   if image_exists; then ok "Image already in ECR"; return; fi
-  if ! $PUSHED_NEW_COMMIT; then
+  if ! $PUSHED_NEW_COMMIT && $HAVE_TOKEN; then
     info "No new commit was pushed - triggering the workflow with workflow_dispatch"
     gh_api POST "/repos/$GITHUB_OWNER/$APP_REPO/actions/workflows/build-push.yaml/dispatches" \
       "{\"ref\":\"$BRANCH\"}" >/dev/null || warn "Dispatch failed - run the workflow from the Actions tab."
+  elif ! $PUSHED_NEW_COMMIT; then
+    warn "Start the first image build yourself (the foundation stack now trusts GitHub Actions):"
+    info "https://github.com/$GITHUB_OWNER/$APP_REPO/actions/workflows/build-push.yaml > Run workflow > main"
   fi
   info "Watch: https://github.com/$GITHUB_OWNER/$APP_REPO/actions"
   for _ in $(seq 1 80); do image_exists && { ok "Image pushed by GitHub Actions"; return; }; sleep 15; done
