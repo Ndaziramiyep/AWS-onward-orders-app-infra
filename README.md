@@ -1,8 +1,8 @@
-# onward-orders-infra
+# AWS-onward-orders-app-infra
 
 Infrastructure for the Onward Logistics order system. Everything is defined in **CloudFormation** and deployed through **CloudFormation GitSync**. Nothing is created by hand in the console, apart from the one-time GitHub authorization for the CodeConnections connection.
 
-Application code, Dockerfile, CI workflow, `appspec.yaml`, and `taskdef.json` live in the separate repo **[onward-orders-app](https://github.com/Ndaziramiyep/onward-orders-app)**.
+Application code, Dockerfile, CI workflow, `appspec.yaml`, and `taskdef.json` live in the separate repo **[AWS-onward-orders-app](https://github.com/Ndaziramiyep/AWS-onward-orders-app)**.
 
 ## How the pieces fit
 
@@ -18,6 +18,27 @@ Internet ─► ALB (public subnets) ─► blue / green target groups ─► Fa
 ```
 
 Full diagram with the numbered change flow: [docs/architecture.md](docs/architecture.md). Costs: [docs/cost-analysis.md](docs/cost-analysis.md). Discovery report: [docs/discovery-report.md](docs/discovery-report.md).
+
+## Deploy everything from AWS CloudShell
+
+```bash
+git clone https://github.com/Ndaziramiyep/AWS-onward-orders-app-infra.git && cd AWS-onward-orders-app-infra
+export GITHUB_TOKEN=<classic PAT with scopes: repo, workflow>   # or you are prompted
+bash cloudshell-deploy.sh
+```
+
+The script deploys the `00-bootstrap` stack, then waits for the one-time GitHub connection authorization, which is the only console step. It fills in the account-specific values (account ID, region, connection, S3 prefix list) in both repos and pushes them. Next it runs GitSync for stacks 01 to 03, waits for GitHub Actions to push the first image, and runs GitSync for stacks 04 to 06. Finally it verifies the environment (ALB health, no NAT, no default route in private subnets, no inline policies). Every step is idempotent, so if CloudShell times out, run it again.
+
+The script may push a commit to each repo with those values. Run `git pull` in your local clones afterwards.
+
+| Command | Purpose |
+|---|---|
+| `bash cloudshell-deploy.sh status` | Stack status, ALB URL, last pipeline run |
+| `bash cloudshell-deploy.sh publish` | Re-apply the account values to both repos and push them if anything changed |
+| `bash cloudshell-deploy.sh verify` | Re-run the security and HA checks |
+| `bash cloudshell-deploy.sh teardown` | Delete stacks 06 to 01 so an idle environment costs nothing |
+
+Settings such as `AWS_REGION`, `PREFIX`, `INFRA_REPO`, `APP_REPO` and `CONNECTION_ARN` are listed at the top of [cloudshell-deploy.sh](cloudshell-deploy.sh).
 
 ## Layout
 
@@ -52,7 +73,7 @@ Region `eu-west-1`, account `648637468459`. Run from the repo root with admin cr
      --template-file bootstrap/00-gitsync-role.yaml \
      --capabilities CAPABILITY_NAMED_IAM \
      --parameter-overrides ExistingConnectionArn=arn:aws:codeconnections:eu-west-1:648637468459:connection/387b1181-82b8-4718-b249-b81bfe30c3c0 \
-     --tags Project=onward-orders Environment=lab Owner=patrick-ndaziramiye CostCenter=amalitech-training ManagedBy=cloudformation Repository=onward-orders-infra
+     --tags Project=onward-orders Environment=lab Owner=patrick-ndaziramiye CostCenter=amalitech-training ManagedBy=cloudformation Repository=AWS-onward-orders-app-infra
    ```
    If `ExistingConnectionArn` is left empty, a new connection is created in `PENDING` status. Open **Developer Tools > Settings > Connections** and click **Update pending connection** to authorize GitHub. This is the only manual console step.
 2. **Foundation, network, ALB** through GitSync:

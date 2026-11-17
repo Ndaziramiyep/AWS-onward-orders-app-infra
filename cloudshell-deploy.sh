@@ -2,23 +2,26 @@
 # =============================================================================================
 # Onward Logistics - one-shot AWS CloudShell deployer
 #
-# Builds the whole lab from this repository, in the only order that works:
+# Lives in the infra repo. Builds the whole lab from the two GitHub repos (infra + app),
+# in the only order that works:
 #
 #   1. Preflight        account, region, tools, GitHub token
-#   2. GitHub repos     create onward-orders-infra + onward-orders-app (lab needs TWO repos)
+#   2. GitHub repos     make sure the infra and app repos exist (lab needs TWO repos)
 #   3. Bootstrap        00-bootstrap stack (GitSync role + CodeConnections GitHub connection)
 #   4. Connection       wait for the one-time GitHub authorization (only manual console step)
-#   5. Publish infra    render account/region/connection values, push infra repo
+#   5. Publish infra    clone infra repo, render account/region/connection values, push if changed
 #   6. GitSync 01-03    foundation (OIDC, ECR), network (no NAT, endpoints), ALB
-#   7. Publish app      push app repo -> GitHub Actions (OIDC) builds and pushes first image
+#   7. Publish app      clone app repo, render, push -> GitHub Actions (OIDC) builds first image
 #   8. Wait for image   ECR :latest must exist before the private ECS service can start
 #   9. GitSync 04-06    ECS service, auto scaling, CodeDeploy/CodePipeline/EventBridge
 #  10. Verify           ALB responds, no NAT, no 0.0.0.0/0 in private routes, no inline policies
 #
 # Every step is idempotent: if CloudShell times out, just run the script again.
+# Both repos are cloned fresh from GitHub, so push your local edits before running.
+# A render commit may be pushed to either repo: 'git pull' your local clones afterwards.
 #
 # Usage (in AWS CloudShell):
-#   git clone https://github.com/<you>/AWS_LAB_03B.git && cd AWS_LAB_03B
+#   git clone https://github.com/<you>/AWS-onward-orders-app-infra.git && cd AWS-onward-orders-app-infra
 #   export GITHUB_TOKEN=<classic PAT with scopes: repo, workflow>   # or you will be prompted
 #   bash cloudshell-deploy.sh            # full deploy (same as: deploy)
 #   bash cloudshell-deploy.sh publish    # only re-render and push both repos
@@ -31,8 +34,8 @@
 #   AWS_REGION        default: CloudShell region, else eu-west-1
 #   PREFIX            default: onward-orders-lab   (must match the templates' ResourcePrefix)
 #   GITHUB_OWNER      default: owner of the GitHub token
-#   INFRA_REPO        default: onward-orders-infra
-#   APP_REPO          default: onward-orders-app
+#   INFRA_REPO        default: AWS-onward-orders-app-infra
+#   APP_REPO          default: AWS-onward-orders-app
 #   BRANCH            default: main
 #   REPO_VISIBILITY   default: public              (public|private)
 #   CONNECTION_ARN    reuse an existing AVAILABLE CodeConnections GitHub connection
@@ -43,13 +46,11 @@ set -Eeuo pipefail
 trap 'echo -e "\n\033[31m[FAILED]\033[0m line $LINENO: $BASH_COMMAND\nFix the cause and re-run - completed steps are skipped." >&2' ERR
 
 # ---------- settings -------------------------------------------------------------------------
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"            # This monorepo
-INFRA_SRC="$ROOT/onward-orders-infra"                              # Infra folder in this repo
-APP_SRC="$ROOT/onward-orders-app"                                  # App folder in this repo
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"            # Infra repo checkout (this script's repo)
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-eu-west-1}}"           # Target region
 PREFIX="${PREFIX:-onward-orders-lab}"                              # Naming prefix
-INFRA_REPO="${INFRA_REPO:-onward-orders-infra}"                    # Infra repo name
-APP_REPO="${APP_REPO:-onward-orders-app}"                          # App repo name
+INFRA_REPO="${INFRA_REPO:-AWS-onward-orders-app-infra}"            # Infra repo name
+APP_REPO="${APP_REPO:-AWS-onward-orders-app}"                      # App repo name
 BRANCH="${BRANCH:-main}"                                           # Branch everything follows
 REPO_VISIBILITY="${REPO_VISIBILITY:-public}"                       # New repo visibility
 START_PIPELINE="${START_PIPELINE:-true}"                           # Prove the pipeline once
@@ -113,8 +114,8 @@ git_auth() { # git with the token injected per command (nothing written to .git/
 preflight() {
   step "1. Preflight"
   for t in aws git jq curl sed base64; do command -v "$t" >/dev/null || die "Missing tool: $t"; done
-  [[ -d "$INFRA_SRC/templates" && -d "$APP_SRC/app" ]] \
-    || die "Run this from the AWS_LAB_03B repo root (expected onward-orders-infra/ and onward-orders-app/)."
+  [[ -d "$ROOT/templates" && -f "$ROOT/bootstrap/00-gitsync-role.yaml" ]] \
+    || die "Run this script from a clone of the infra repo (expected templates/ and bootstrap/ next to it)."
   aws codeconnections help >/dev/null 2>&1 || die "AWS CLI too old for 'codeconnections'. Update the AWS CLI v2."
 
   ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)" || die "No AWS credentials."
@@ -155,30 +156,25 @@ ensure_repo() {
   ok "Created github.com/$GITHUB_OWNER/$name ($REPO_VISIBILITY)"
 }
 
-# Copies a folder of this monorepo into its own repo, renders it, commits and pushes.
-# Sets PUSHED_NEW_COMMIT=true|false.
+# Clones a repo fresh from GitHub, renders the account-specific values, and pushes only if
+# that changed something. Sets PUSHED_NEW_COMMIT=true|false.
 publish_repo() {
-  local src="$1" name="$2" render_fn="$3" dir="$WORK_DIR/$2"
+  local name="$1" render_fn="$2" check="$3" dir="$WORK_DIR/$1"
   local url="https://github.com/$GITHUB_OWNER/$name.git"
-  rm -rf "$dir"; mkdir -p "$dir"
-  if git_auth ls-remote --exit-code --heads "$url" "$BRANCH" >/dev/null 2>&1; then
-    git_auth clone -q --branch "$BRANCH" "$url" "$dir"
-  else
-    git -C "$dir" init -q -b "$BRANCH"
-    git -C "$dir" remote add origin "$url"
-  fi
-  find "$dir" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-  cp -a "$src/." "$dir/"
-  [[ -f "$dir/.gitignore" || ! -f "$ROOT/.gitignore" ]] || cp "$ROOT/.gitignore" "$dir/.gitignore"
+  rm -rf "$dir"
+  git_auth ls-remote --exit-code --heads "$url" "$BRANCH" >/dev/null 2>&1 \
+    || die "$url has no '$BRANCH' branch. Push your code to it first, then re-run."
+  git_auth clone -q --branch "$BRANCH" "$url" "$dir"
+  [[ -e "$dir/$check" ]] || die "$name does not look right: '$check' is missing at the repo root."
   "$render_fn" "$dir"
   git -C "$dir" add -A
   if git -C "$dir" diff --cached --quiet; then
-    PUSHED_NEW_COMMIT=false; ok "$name already up to date on GitHub"
+    PUSHED_NEW_COMMIT=false; ok "$name already has this account's values"
   else
     git -C "$dir" -c user.name="$GITHUB_LOGIN" -c user.email="$GIT_EMAIL" \
-      commit -q -m "chore: publish from AWS_LAB_03B ($(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo local))"
+      commit -q -m "chore: set account values for $ACCOUNT_ID / $REGION"
     git_auth -C "$dir" push -q origin "$BRANCH"
-    PUSHED_NEW_COMMIT=true; ok "Pushed $name -> $url"
+    PUSHED_NEW_COMMIT=true; ok "Pushed $name -> $url  (run 'git pull' in your local clone)"
   fi
 }
 
@@ -265,7 +261,7 @@ bootstrap() {
   # On re-runs, parameters not passed keep their previous values (never flips the connection condition)
   aws cloudformation deploy \
     --stack-name "$BOOTSTRAP_STACK" \
-    --template-file "$INFRA_SRC/bootstrap/00-gitsync-role.yaml" \
+    --template-file "$ROOT/bootstrap/00-gitsync-role.yaml" \
     --capabilities CAPABILITY_NAMED_IAM \
     --no-fail-on-empty-changeset \
     --parameter-overrides "${overrides[@]}" \
@@ -316,7 +312,7 @@ image_exists() {
 }
 first_image() {
   step "7. Publish app repo (GitHub Actions builds the first image)"
-  publish_repo "$APP_SRC" "$APP_REPO" render_app
+  publish_repo "$APP_REPO" render_app .github/workflows/build-push.yaml
   step "8. Wait for $PREFIX:latest in ECR"
   if image_exists; then ok "Image already in ECR"; return; fi
   if ! $PUSHED_NEW_COMMIT; then
@@ -402,8 +398,8 @@ summary() {
   CodeDeploy:    https://$REGION.console.aws.amazon.com/codesuite/codedeploy/deployments?region=$REGION
   Log file:      $LOG_FILE
 
-  Release:       edit RELEASE_NOTE in onward-orders-app/app/settings.py, then
-                 'bash cloudshell-deploy.sh publish' (or push the app repo directly)
+  Release:       edit RELEASE_NOTE in app/settings.py in the app repo and push to $BRANCH
+                 (first 'git pull' if this run pushed a render commit)
   Bad release:   set FORCE_UNHEALTHY = True and publish -> CodeDeploy rolls back
   Zero downtime: while true; do curl -s http://$alb/version; echo; sleep 1; done
   Scale demo:    for i in \$(seq 200); do curl -s "http://$alb/cpu?seconds=1" >/dev/null & done
@@ -418,7 +414,7 @@ cmd_deploy() {
   preflight
   github_login
   step "Plan"
-  info "Create/update GitHub repos $GITHUB_OWNER/$INFRA_REPO and $GITHUB_OWNER/$APP_REPO ($REPO_VISIBILITY)"
+  info "Use GitHub repos $GITHUB_OWNER/$INFRA_REPO and $GITHUB_OWNER/$APP_REPO (created $REPO_VISIBILITY if missing)"
   info "Deploy stacks $PREFIX-00 .. 06 in $REGION / account $ACCOUNT_ID (ALB + endpoints + Fargate bill hourly)"
   confirm "Proceed?" || die "Cancelled."
 
@@ -430,7 +426,7 @@ cmd_deploy() {
 
   step "5. Publish infra repo"
   discover_values
-  publish_repo "$INFRA_SRC" "$INFRA_REPO" render_infra
+  publish_repo "$INFRA_REPO" render_infra deployments/01-foundation.deployment.yaml
 
   step "6. GitSync: foundation, network, ALB"
   gitsync 01-foundation 02-network 03-alb
@@ -450,8 +446,8 @@ cmd_publish() {
   [[ "$(stack_status "$BOOTSTRAP_STACK")" != NOT_FOUND ]] || die "Run a full deploy first."
   CONNECTION_ARN="$(stack_out "$BOOTSTRAP_STACK" ConnectionArn)"
   discover_values
-  step "Publish infra repo"; publish_repo "$INFRA_SRC" "$INFRA_REPO" render_infra
-  step "Publish app repo";   publish_repo "$APP_SRC" "$APP_REPO" render_app
+  step "Publish infra repo"; publish_repo "$INFRA_REPO" render_infra deployments/01-foundation.deployment.yaml
+  step "Publish app repo";   publish_repo "$APP_REPO" render_app .github/workflows/build-push.yaml
   if $PUSHED_NEW_COMMIT; then
     info "GitHub Actions -> ECR -> EventBridge -> CodePipeline will release it."
   fi
@@ -492,7 +488,7 @@ cmd_teardown() {
   confirm "Delete the environment?" || die "Cancelled."
   empty_bucket "$(stack_out "$PREFIX-06-delivery" ArtifactBucketName)"
   AWS_REGION="$REGION" PREFIX="$PREFIX" KEEP_BOOTSTRAP="${KEEP_BOOTSTRAP:-true}" \
-    bash "$INFRA_SRC/scripts/teardown.sh"
+    bash "$ROOT/scripts/teardown.sh"
 }
 
 # ---------- entry point ----------------------------------------------------------------------
@@ -501,7 +497,7 @@ for a in "$@"; do
   case "$a" in
     -y|--yes) ASSUME_YES=true ;;
     deploy|publish|status|verify|teardown) CMD="$a" ;;
-    -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
     *) die "Unknown argument: $a (try --help)" ;;
   esac
 done
