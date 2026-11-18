@@ -80,7 +80,8 @@ Resources:
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 1
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-artifacts" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-artifacts"
 
   # Denies any non-HTTPS access to the artifact bucket.
   ArtifactBucketPolicy:
@@ -111,7 +112,8 @@ Resources:
       MetricName: HTTPCode_Target_5XX_Count
       Dimensions:
         - Name: LoadBalancer
-          Value: !ImportValue { "Fn::Sub": "${ResourcePrefix}-alb-full-name" }
+          Value: !ImportValue
+            "Fn::Sub": "${ResourcePrefix}-alb-full-name"
       Statistic: Sum
       Period: 60
       EvaluationPeriods: 1
@@ -129,9 +131,11 @@ Resources:
       MetricName: UnHealthyHostCount
       Dimensions:
         - Name: LoadBalancer
-          Value: !ImportValue { "Fn::Sub": "${ResourcePrefix}-alb-full-name" }
+          Value: !ImportValue
+            "Fn::Sub": "${ResourcePrefix}-alb-full-name"
         - Name: TargetGroup
-          Value: !ImportValue { "Fn::Sub": "${ResourcePrefix}-tg-blue-full-name" }
+          Value: !ImportValue
+            "Fn::Sub": "${ResourcePrefix}-tg-blue-full-name"
       Statistic: Maximum
       Period: 60
       EvaluationPeriods: 2
@@ -150,9 +154,11 @@ Resources:
       MetricName: UnHealthyHostCount
       Dimensions:
         - Name: LoadBalancer
-          Value: !ImportValue { "Fn::Sub": "${ResourcePrefix}-alb-full-name" }
+          Value: !ImportValue
+            "Fn::Sub": "${ResourcePrefix}-alb-full-name"
         - Name: TargetGroup
-          Value: !ImportValue { "Fn::Sub": "${ResourcePrefix}-tg-green-full-name" }
+          Value: !ImportValue
+            "Fn::Sub": "${ResourcePrefix}-tg-green-full-name"
       Statistic: Maximum
       Period: 60
       EvaluationPeriods: 2
@@ -171,7 +177,8 @@ Resources:
         Version: "2012-10-17"
         Statement:
           - Effect: Allow
-            Principal: { Service: codedeploy.amazonaws.com }
+            Principal:
+              Service: codedeploy.amazonaws.com
             Action: sts:AssumeRole
             Condition:
               StringEquals:
@@ -179,7 +186,8 @@ Resources:
       ManagedPolicyArns:
         - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSCodeDeployRoleForECS
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-codedeploy-role" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-codedeploy-role"
 
   # CodeDeploy application for the order service.
   CodeDeployApplication:
@@ -188,7 +196,8 @@ Resources:
       ApplicationName: !Sub ${ResourcePrefix}-app
       ComputePlatform: ECS
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-app" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-app"
 
   # Blue/green canary deployment with automatic rollback on failure or alarm.
   DeploymentGroup:
@@ -209,19 +218,25 @@ Resources:
           Action: TERMINATE
           TerminationWaitTimeInMinutes: !Ref BlueTerminationWaitMinutes
       ECSServices:
-        - ClusterName: !ImportValue { "Fn::Sub": "${ResourcePrefix}-cluster-name" }
-          ServiceName: !ImportValue { "Fn::Sub": "${ResourcePrefix}-service-name" }
+        - ClusterName: !ImportValue
+            "Fn::Sub": "${ResourcePrefix}-cluster-name"
+          ServiceName: !ImportValue
+            "Fn::Sub": "${ResourcePrefix}-service-name"
       LoadBalancerInfo:
         TargetGroupPairInfoList:
           - TargetGroups:
-              - Name: !ImportValue { "Fn::Sub": "${ResourcePrefix}-tg-blue-name" }
-              - Name: !ImportValue { "Fn::Sub": "${ResourcePrefix}-tg-green-name" }
+              - Name: !ImportValue
+                  "Fn::Sub": "${ResourcePrefix}-tg-blue-name"
+              - Name: !ImportValue
+                  "Fn::Sub": "${ResourcePrefix}-tg-green-name"
             ProdTrafficRoute:
               ListenerArns:
-                - !ImportValue { "Fn::Sub": "${ResourcePrefix}-prod-listener-arn" }
+                - !ImportValue
+                  "Fn::Sub": "${ResourcePrefix}-prod-listener-arn"
             TestTrafficRoute:
               ListenerArns:
-                - !ImportValue { "Fn::Sub": "${ResourcePrefix}-test-listener-arn" }
+                - !ImportValue
+                  "Fn::Sub": "${ResourcePrefix}-test-listener-arn"
       AutoRollbackConfiguration:
         Enabled: true
         Events:
@@ -236,7 +251,8 @@ Resources:
           - Name: !Ref BlueUnhealthyAlarm
           - Name: !Ref GreenUnhealthyAlarm
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-dg" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-dg"
 
   # Least-privilege pipeline permissions. ECS register/describe actions do not support resource-level permissions.
   PipelinePolicy:
@@ -261,7 +277,8 @@ Resources:
           - Sid: EcrSource
             Effect: Allow
             Action: ecr:DescribeImages
-            Resource: !ImportValue { "Fn::Sub": "${ResourcePrefix}-ecr-repo-arn" }
+            Resource: !ImportValue
+              "Fn::Sub": "${ResourcePrefix}-ecr-repo-arn"
           - Sid: GitHubSource
             Effect: Allow
             Action:
@@ -299,8 +316,10 @@ Resources:
             Effect: Allow
             Action: iam:PassRole
             Resource:
-              - !ImportValue { "Fn::Sub": "${ResourcePrefix}-task-exec-role-arn" }
-              - !ImportValue { "Fn::Sub": "${ResourcePrefix}-task-role-arn" }
+              - !ImportValue
+                "Fn::Sub": "${ResourcePrefix}-task-exec-role-arn"
+              - !ImportValue
+                "Fn::Sub": "${ResourcePrefix}-task-role-arn"
             Condition:
               StringEquals:
                 iam:PassedToService: ecs-tasks.amazonaws.com
@@ -315,7 +334,8 @@ Resources:
         Version: "2012-10-17"
         Statement:
           - Effect: Allow
-            Principal: { Service: codepipeline.amazonaws.com }
+            Principal:
+              Service: codepipeline.amazonaws.com
             Action: sts:AssumeRole
             Condition:
               StringEquals:
@@ -323,7 +343,8 @@ Resources:
       ManagedPolicyArns:
         - !Ref PipelinePolicy
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-pipeline-role" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-pipeline-role"
 
   # Release pipeline: ECR image + app repo specs -> CodeDeploy. Starts on image push, never on a commit alone.
   Pipeline:
@@ -340,15 +361,24 @@ Resources:
         - Name: Source
           Actions:
             - Name: Image
-              ActionTypeId: { Category: Source, Owner: AWS, Provider: ECR, Version: "1" }
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: ECR
+                Version: "1"
               Configuration:
-                RepositoryName: !ImportValue { "Fn::Sub": "${ResourcePrefix}-ecr-repo-name" }
+                RepositoryName: !ImportValue
+                  "Fn::Sub": "${ResourcePrefix}-ecr-repo-name"
                 ImageTag: !Ref WatchedImageTag
               OutputArtifacts:
                 - Name: ImageArtifact
               RunOrder: 1
             - Name: DeploySpecs
-              ActionTypeId: { Category: Source, Owner: AWS, Provider: CodeStarSourceConnection, Version: "1" }
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
               Configuration:
                 ConnectionArn: !Ref ConnectionArn
                 FullRepositoryId: !Sub ${GitHubOrg}/${AppRepo}
@@ -361,7 +391,11 @@ Resources:
         - Name: Deploy
           Actions:
             - Name: BlueGreenToEcs
-              ActionTypeId: { Category: Deploy, Owner: AWS, Provider: CodeDeployToECS, Version: "1" }
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CodeDeployToECS
+                Version: "1"
               Configuration:
                 ApplicationName: !Ref CodeDeployApplication
                 DeploymentGroupName: !Ref DeploymentGroup
@@ -376,7 +410,8 @@ Resources:
                 - Name: ImageArtifact
               RunOrder: 1
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-pipeline" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-pipeline"
 
   # Lets EventBridge start this pipeline and nothing else.
   EventBridgePolicy:
@@ -401,7 +436,8 @@ Resources:
         Version: "2012-10-17"
         Statement:
           - Effect: Allow
-            Principal: { Service: events.amazonaws.com }
+            Principal:
+              Service: events.amazonaws.com
             Action: sts:AssumeRole
             Condition:
               StringEquals:
@@ -409,7 +445,8 @@ Resources:
       ManagedPolicyArns:
         - !Ref EventBridgePolicy
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-events-pipeline-role" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-events-pipeline-role"
 
   # Starts the pipeline when an image with the watched tag is pushed.
   ImagePushRule:
@@ -429,7 +466,8 @@ Resources:
           result:
             - SUCCESS
           repository-name:
-            - !ImportValue { "Fn::Sub": "${ResourcePrefix}-ecr-repo-name" }
+            - !ImportValue
+              "Fn::Sub": "${ResourcePrefix}-ecr-repo-name"
           image-tag:
             - !Ref WatchedImageTag
       Targets:

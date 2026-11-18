@@ -19,7 +19,9 @@ Parameters:
       new one (it starts PENDING and needs the one-time GitHub authorization in the console).
 
 Conditions:
-  CreateConnection: !Equals [!Ref ExistingConnectionArn, ""]
+  CreateConnection: !Equals
+    - !Ref ExistingConnectionArn
+    - ""
 
 Resources:
   # CodeConnections link to GitHub, created only when no existing connection ARN is given.
@@ -192,11 +194,9 @@ Outputs:
       Name: !Sub ${ResourcePrefix}-gitsync-role-arn
   ConnectionArn:
     Description: CodeConnections GitHub connection used by GitSync and CodePipeline.
-    Value:
-      !If [
-        CreateConnection,
-        !GetAtt GitHubConnection.ConnectionArn,
-        !Ref ExistingConnectionArn,
-      ]
+    Value: !If
+      - CreateConnection
+      - !GetAtt GitHubConnection.ConnectionArn
+      - !Ref ExistingConnectionArn
     Export:
       Name: !Sub ${ResourcePrefix}-github-connection-arn

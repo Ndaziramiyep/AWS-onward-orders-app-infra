@@ -35,7 +35,9 @@ Parameters:
     Description: Number of git-SHA tagged images kept in ECR for rollback.
 
 Conditions:
-  CreateOidcProvider: !Equals [!Ref ExistingOidcProviderArn, ""]
+  CreateOidcProvider: !Equals
+    - !Ref ExistingOidcProviderArn
+    - ""
 
 Resources:
   # GitHub OIDC identity provider. IAM trusts GitHub's CA; thumbprints are kept for older tooling.
@@ -50,7 +52,8 @@ Resources:
         - 6938fd4d98bab03faadb97b34396831e3780aea1
         - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-github-oidc" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-github-oidc"
 
   # Private image repository. SHA tags are immutable; only "latest" moves, because the pipeline watches it.
   EcrRepository:
@@ -85,7 +88,8 @@ Resources:
             ]
           }
       Tags:
-        - { Key: Name, Value: !Ref ResourcePrefix }
+        - Key: Name
+          Value: !Ref ResourcePrefix
 
   # Push access to this repository only.
   GitHubActionsPushPolicy:
@@ -142,7 +146,10 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Federated: !If [CreateOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]
+              Federated: !If
+                - CreateOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Ref ExistingOidcProviderArn
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
               StringEquals:
@@ -155,19 +162,24 @@ Resources:
         - !Ref GitHubActionsPushPolicy
         - !Ref GitHubActionsReleasePolicy
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-github-actions-role" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-github-actions-role"
 
 Outputs:
   EcrRepositoryName:
     Value: !Ref EcrRepository
-    Export: { Name: !Sub "${ResourcePrefix}-ecr-repo-name" }
+    Export:
+      Name: !Sub "${ResourcePrefix}-ecr-repo-name"
   EcrRepositoryArn:
     Value: !GetAtt EcrRepository.Arn
-    Export: { Name: !Sub "${ResourcePrefix}-ecr-repo-arn" }
+    Export:
+      Name: !Sub "${ResourcePrefix}-ecr-repo-arn"
   EcrRepositoryUri:
     Value: !GetAtt EcrRepository.RepositoryUri
-    Export: { Name: !Sub "${ResourcePrefix}-ecr-repo-uri" }
+    Export:
+      Name: !Sub "${ResourcePrefix}-ecr-repo-uri"
   GitHubActionsRoleArn:
     Description: Paste into the app repo workflow (role-to-assume). Not a secret.
     Value: !GetAtt GitHubActionsRole.Arn
-    Export: { Name: !Sub "${ResourcePrefix}-github-actions-role-arn" }
+    Export:
+      Name: !Sub "${ResourcePrefix}-github-actions-role-arn"

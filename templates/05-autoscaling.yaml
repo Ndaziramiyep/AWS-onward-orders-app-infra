@@ -40,11 +40,15 @@ Parameters:
   EnableOfficeHoursSchedule:
     Type: String
     Default: "false"
-    AllowedValues: ["true", "false"]
+    AllowedValues:
+      - "true"
+      - "false"
     Description: If true, scale to 0 at 19:00 and back to MinCapacity at 07:00 (Mon-Fri, UTC).
 
 Conditions:
-  UseSchedule: !Equals [!Ref EnableOfficeHoursSchedule, "true"]
+  UseSchedule: !Equals
+    - !Ref EnableOfficeHoursSchedule
+    - "true"
 
 Resources:
   # Scaling bounds for the service, with an optional overnight scale-to-zero schedule.
@@ -55,22 +59,26 @@ Resources:
       ScalableDimension: ecs:service:DesiredCount
       ResourceId: !Sub
         - service/${Cluster}/${Service}
-        - Cluster: !ImportValue { "Fn::Sub": "${ResourcePrefix}-cluster-name" }
-          Service: !ImportValue { "Fn::Sub": "${ResourcePrefix}-service-name" }
+        - Cluster: !ImportValue
+            "Fn::Sub": "${ResourcePrefix}-cluster-name"
+          Service: !ImportValue
+            "Fn::Sub": "${ResourcePrefix}-service-name"
       MinCapacity: !Ref MinCapacity
       MaxCapacity: !Ref MaxCapacity
       RoleARN: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService
       ScheduledActions: !If
         - UseSchedule
-        - - ScheduledActionName: !Sub ${ResourcePrefix}-evening-scale-to-zero
-            Schedule: cron(0 19 ? * MON-FRI *)
-            ScalableTargetAction: { MinCapacity: 0, MaxCapacity: 0 }
-          - ScheduledActionName: !Sub ${ResourcePrefix}-morning-scale-up
-            Schedule: cron(0 7 ? * MON-FRI *)
-            ScalableTargetAction: { MinCapacity: !Ref MinCapacity, MaxCapacity: !Ref MaxCapacity }
+        -   - ScheduledActionName: !Sub ${ResourcePrefix}-evening-scale-to-zero
+              Schedule: cron(0 19 ? * MON-FRI *)
+              ScalableTargetAction:
+                MinCapacity: 0
+                MaxCapacity: 0
+            - ScheduledActionName: !Sub ${ResourcePrefix}-morning-scale-up
+              Schedule: cron(0 7 ? * MON-FRI *)
+              ScalableTargetAction:
+                MinCapacity: !Ref MinCapacity
+                MaxCapacity: !Ref MaxCapacity
         - !Ref AWS::NoValue
-
-  # Scales on CPU. ALBRequestCountPerTarget is not used: blue/green swaps target groups, so it would go stale.
   CpuScalingPolicy:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
     Properties:

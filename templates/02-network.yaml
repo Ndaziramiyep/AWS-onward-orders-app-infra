@@ -50,14 +50,16 @@ Resources:
       EnableDnsSupport: true
       EnableDnsHostnames: true
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-vpc" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-vpc"
 
   # Internet gateway, used by the public subnets only.
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-igw" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-igw"
 
   # Attaches the internet gateway to the VPC.
   InternetGatewayAttachment:
@@ -72,11 +74,15 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Ref PublicSubnetACidr
-      AvailabilityZone: !Select [0, !GetAZs ""]
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ""
       MapPublicIpOnLaunch: false
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-public-a" }
-        - { Key: Tier, Value: public }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-public-a"
+        - Key: Tier
+          Value: public
 
   # Public subnet in AZ b, for the ALB only.
   PublicSubnetB:
@@ -84,11 +90,15 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Ref PublicSubnetBCidr
-      AvailabilityZone: !Select [1, !GetAZs ""]
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ""
       MapPublicIpOnLaunch: false
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-public-b" }
-        - { Key: Tier, Value: public }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-public-b"
+        - Key: Tier
+          Value: public
 
   # Private subnet in AZ a, for tasks and interface endpoints.
   PrivateSubnetA:
@@ -96,11 +106,15 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Ref PrivateSubnetACidr
-      AvailabilityZone: !Select [0, !GetAZs ""]
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ""
       MapPublicIpOnLaunch: false
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-private-a" }
-        - { Key: Tier, Value: private }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-private-a"
+        - Key: Tier
+          Value: private
 
   # Private subnet in AZ b, for tasks and interface endpoints.
   PrivateSubnetB:
@@ -108,11 +122,15 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       CidrBlock: !Ref PrivateSubnetBCidr
-      AvailabilityZone: !Select [1, !GetAZs ""]
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ""
       MapPublicIpOnLaunch: false
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-private-b" }
-        - { Key: Tier, Value: private }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-private-b"
+        - Key: Tier
+          Value: private
 
   # Route table shared by the public subnets.
   PublicRouteTable:
@@ -120,7 +138,8 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-public-rt" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-public-rt"
 
   # Internet route for the public subnets.
   PublicInternetRoute:
@@ -151,7 +170,8 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-private-rt-a" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-private-rt-a"
 
   # Private route table for AZ b: no default route, AWS is reached through VPC endpoints.
   PrivateRouteTableB:
@@ -159,7 +179,8 @@ Resources:
     Properties:
       VpcId: !Ref Vpc
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-private-rt-b" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-private-rt-b"
 
   # Associates private subnet A with its route table.
   PrivateSubnetARouteTableAssociation:
@@ -183,13 +204,28 @@ Resources:
       GroupDescription: Internet-facing ALB. HTTP/HTTPS from anywhere, test listener restricted.
       VpcId: !Ref Vpc
       SecurityGroupIngress:
-        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: Production HTTP }
-        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: Production HTTPS }
-        - { IpProtocol: tcp, FromPort: 8080, ToPort: 8080, CidrIp: !Ref TestListenerIngressCidr, Description: CodeDeploy test listener }
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Production HTTP
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Production HTTPS
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !Ref TestListenerIngressCidr
+          Description: CodeDeploy test listener
       SecurityGroupEgress:
-        - { IpProtocol: "-1", CidrIp: 127.0.0.1/32, Description: Removes default allow-all egress }
+        - IpProtocol: "-1"
+          CidrIp: 127.0.0.1/32
+          Description: Removes default allow-all egress
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-alb-sg" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-alb-sg"
 
   # Fargate task security group, reachable only from the ALB.
   TaskSecurityGroup:
@@ -199,9 +235,12 @@ Resources:
       GroupDescription: ECS Fargate tasks. Reachable only from the ALB.
       VpcId: !Ref Vpc
       SecurityGroupEgress:
-        - { IpProtocol: "-1", CidrIp: 127.0.0.1/32, Description: Removes default allow-all egress }
+        - IpProtocol: "-1"
+          CidrIp: 127.0.0.1/32
+          Description: Removes default allow-all egress
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-task-sg" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-task-sg"
 
   # Interface endpoint security group, HTTPS from tasks only.
   EndpointSecurityGroup:
@@ -211,9 +250,12 @@ Resources:
       GroupDescription: Interface VPC endpoints. HTTPS only from the tasks.
       VpcId: !Ref Vpc
       SecurityGroupEgress:
-        - { IpProtocol: "-1", CidrIp: 127.0.0.1/32, Description: Removes default allow-all egress }
+        - IpProtocol: "-1"
+          CidrIp: 127.0.0.1/32
+          Description: Removes default allow-all egress
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-endpoint-sg" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-endpoint-sg"
 
   # ALB to tasks on the app port. Cross-group rules are separate to avoid circular references.
   AlbToTaskEgress:
@@ -297,10 +339,14 @@ Resources:
       ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      SecurityGroupIds:
+        - !Ref EndpointSecurityGroup
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-vpce-ecr-api" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-vpce-ecr-api"
 
   # Interface endpoint for ECR Docker image pulls.
   EcrDkrEndpoint:
@@ -310,10 +356,14 @@ Resources:
       ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      SecurityGroupIds:
+        - !Ref EndpointSecurityGroup
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-vpce-ecr-dkr" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-vpce-ecr-dkr"
 
   # Interface endpoint for CloudWatch Logs.
   LogsEndpoint:
@@ -323,30 +373,47 @@ Resources:
       ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
       VpcEndpointType: Interface
       PrivateDnsEnabled: true
-      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      SecurityGroupIds:
+        - !Ref EndpointSecurityGroup
       Tags:
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-vpce-logs" }
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-vpce-logs"
 
 Outputs:
   VpcId:
     Value: !Ref Vpc
-    Export: { Name: !Sub "${ResourcePrefix}-vpc-id" }
+    Export:
+      Name: !Sub "${ResourcePrefix}-vpc-id"
   VpcCidr:
     Value: !Ref VpcCidr
-    Export: { Name: !Sub "${ResourcePrefix}-vpc-cidr" }
+    Export:
+      Name: !Sub "${ResourcePrefix}-vpc-cidr"
   PublicSubnetIds:
-    Value: !Join [",", [!Ref PublicSubnetA, !Ref PublicSubnetB]]
-    Export: { Name: !Sub "${ResourcePrefix}-public-subnet-ids" }
+    Value: !Join
+      - ","
+      -   - !Ref PublicSubnetA
+          - !Ref PublicSubnetB
+    Export:
+      Name: !Sub "${ResourcePrefix}-public-subnet-ids"
   PrivateSubnetIds:
-    Value: !Join [",", [!Ref PrivateSubnetA, !Ref PrivateSubnetB]]
-    Export: { Name: !Sub "${ResourcePrefix}-private-subnet-ids" }
+    Value: !Join
+      - ","
+      -   - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+    Export:
+      Name: !Sub "${ResourcePrefix}-private-subnet-ids"
   AlbSecurityGroupId:
     Value: !Ref AlbSecurityGroup
-    Export: { Name: !Sub "${ResourcePrefix}-alb-sg-id" }
+    Export:
+      Name: !Sub "${ResourcePrefix}-alb-sg-id"
   TaskSecurityGroupId:
     Value: !Ref TaskSecurityGroup
-    Export: { Name: !Sub "${ResourcePrefix}-task-sg-id" }
+    Export:
+      Name: !Sub "${ResourcePrefix}-task-sg-id"
   EndpointSecurityGroupId:
     Value: !Ref EndpointSecurityGroup
-    Export: { Name: !Sub "${ResourcePrefix}-endpoint-sg-id" }
+    Export:
+      Name: !Sub "${ResourcePrefix}-endpoint-sg-id"
