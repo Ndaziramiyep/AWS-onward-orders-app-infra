@@ -196,7 +196,11 @@ Resources:
       SubnetId: !Ref PrivateSubnetB
       RouteTableId: !Ref PrivateRouteTableB
 
-  # ALB security group. The 127.0.0.1/32 egress rule replaces the default allow-all.
+  # Security groups: each group's rules are written inline, in the group itself. Only the two
+  # ingress rules that point back at another group are separate resources (TaskFromAlbIngress,
+  # EndpointFromTaskIngress), because inline references in both directions would be circular.
+
+  # ALB: HTTP/HTTPS from anywhere, test listener from inside the VPC, and egress only to the tasks.
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -220,14 +224,16 @@ Resources:
           CidrIp: !Ref TestListenerIngressCidr
           Description: CodeDeploy test listener
       SecurityGroupEgress:
-        - IpProtocol: "-1"
-          CidrIp: 127.0.0.1/32
-          Description: Removes default allow-all egress
+        - IpProtocol: tcp
+          FromPort: !Ref AppPort
+          ToPort: !Ref AppPort
+          DestinationSecurityGroupId: !Ref TaskSecurityGroup
+          Description: ALB to tasks (traffic and health checks)
       Tags:
         - Key: Name
           Value: !Sub "${ResourcePrefix}-alb-sg"
 
-  # Fargate task security group, reachable only from the ALB.
+  # Fargate tasks: reachable only from the ALB (TaskFromAlbIngress); egress only to AWS services.
   TaskSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -235,14 +241,22 @@ Resources:
       GroupDescription: ECS Fargate tasks. Reachable only from the ALB.
       VpcId: !Ref Vpc
       SecurityGroupEgress:
-        - IpProtocol: "-1"
-          CidrIp: 127.0.0.1/32
-          Description: Removes default allow-all egress
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          DestinationSecurityGroupId: !Ref EndpointSecurityGroup
+          Description: HTTPS to interface endpoints (ECR, Logs)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          DestinationPrefixListId: !Ref S3PrefixListId
+          Description: HTTPS to S3 gateway endpoint (ECR image layers)
       Tags:
         - Key: Name
           Value: !Sub "${ResourcePrefix}-task-sg"
 
-  # Interface endpoint security group, HTTPS from tasks only.
+  # Interface endpoints: HTTPS only from the tasks (EndpointFromTaskIngress). They need no egress,
+  # so the single 127.0.0.1/32 rule only replaces AWS's default allow-all egress.
   EndpointSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -257,17 +271,6 @@ Resources:
         - Key: Name
           Value: !Sub "${ResourcePrefix}-endpoint-sg"
 
-  # ALB to tasks on the app port. Cross-group rules are separate to avoid circular references.
-  AlbToTaskEgress:
-    Type: AWS::EC2::SecurityGroupEgress
-    Properties:
-      GroupId: !Ref AlbSecurityGroup
-      IpProtocol: tcp
-      FromPort: !Ref AppPort
-      ToPort: !Ref AppPort
-      DestinationSecurityGroupId: !Ref TaskSecurityGroup
-      Description: ALB to tasks (traffic and health checks)
-
   # Tasks accept the app port from the ALB only.
   TaskFromAlbIngress:
     Type: AWS::EC2::SecurityGroupIngress
@@ -278,28 +281,6 @@ Resources:
       ToPort: !Ref AppPort
       SourceSecurityGroupId: !Ref AlbSecurityGroup
       Description: App port only from the ALB
-
-  # Tasks to interface endpoints (ECR, Logs) over HTTPS.
-  TaskToEndpointEgress:
-    Type: AWS::EC2::SecurityGroupEgress
-    Properties:
-      GroupId: !Ref TaskSecurityGroup
-      IpProtocol: tcp
-      FromPort: 443
-      ToPort: 443
-      DestinationSecurityGroupId: !Ref EndpointSecurityGroup
-      Description: HTTPS to interface endpoints (ECR, Logs)
-
-  # Tasks to S3 over HTTPS, for ECR image layers via the gateway endpoint.
-  TaskToS3Egress:
-    Type: AWS::EC2::SecurityGroupEgress
-    Properties:
-      GroupId: !Ref TaskSecurityGroup
-      IpProtocol: tcp
-      FromPort: 443
-      ToPort: 443
-      DestinationPrefixListId: !Ref S3PrefixListId
-      Description: HTTPS to S3 gateway endpoint (ECR image layers)
 
   # Interface endpoints accept HTTPS from tasks only.
   EndpointFromTaskIngress:
