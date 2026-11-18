@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# =============================================================================================
-# Onward Logistics - one-shot AWS CloudShell deployer
+# Onward Logistics - one-shot AWS CloudShell deployer.
 #
-# Lives in the infra repo. Builds the whole lab from the two GitHub repos (infra + app),
-# in the only order that works:
+# Builds the whole lab from the infra and app GitHub repos, in the only order that works:
 #
 #   1. Preflight        account, region, tools, GitHub token
-#   2. GitHub repos     make sure the infra and app repos exist (lab needs TWO repos)
+#   2. GitHub repos     make sure the infra and app repos exist
 #   3. Bootstrap        00-bootstrap stack (GitSync role + CodeConnections GitHub connection)
 #   4. Connection       wait for the one-time GitHub authorization (only manual console step)
 #   5. Publish infra    clone infra repo, render account/region/connection values, push if changed
@@ -14,10 +12,13 @@
 #   7. Publish app      clone app repo, render, push -> GitHub Actions (OIDC) builds first image
 #   8. Wait for image   ECR :latest must exist before the private ECS service can start
 #   9. GitSync 04-06    ECS service, auto scaling, CodeDeploy/CodePipeline/EventBridge
+#
+# GitSync only updates stacks, so steps 6 and 9 create each missing stack once from its deployment
+# file, attach GitSync, and wait for it. After that, every change pushed to main is applied by GitSync.
 #  10. Verify           ALB responds, no NAT, no 0.0.0.0/0 in private routes, no inline policies
 #
-# Every step is idempotent: if CloudShell times out, just run the script again.
-# Both repos are cloned fresh from GitHub, so push your local edits before running.
+# Every step is idempotent: if CloudShell times out, run the script again.
+# Both repos are cloned fresh from GitHub, so push local edits before running.
 # A render commit may be pushed to either repo: 'git pull' your local clones afterwards.
 #
 # Usage (in AWS CloudShell):
@@ -27,7 +28,7 @@
 #   bash cloudshell-deploy.sh publish    # only re-render and push both repos
 #   bash cloudshell-deploy.sh status     # stack status, URLs, last pipeline run
 #   bash cloudshell-deploy.sh verify     # run the security / HA checks again
-#   bash cloudshell-deploy.sh teardown   # delete stacks 06 -> 01 (idle costs nothing)
+#   bash cloudshell-deploy.sh teardown   # delete stacks 06 -> 01 (idle costs nothing; 'deploy' rebuilds)
 #   Add -y to skip confirmation prompts.
 #
 # Overridable settings (export before running):
@@ -40,83 +41,112 @@
 #   REPO_VISIBILITY   default: public              (public|private)
 #   CONNECTION_ARN    reuse an existing AVAILABLE CodeConnections GitHub connection
 #   START_PIPELINE    default: true  (release once through the pipeline to prove it end to end)
-#   KEEP_BOOTSTRAP    default: true  (teardown keeps the 00 bootstrap stack + connection)
-# =============================================================================================
+#   KEEP_BOOTSTRAP    default: true  (teardown keeps the 00 bootstrap stack + GitHub connection)
+
+# Strict mode; any failure reports the line and stops.
 set -Eeuo pipefail
 trap 'echo -e "\n\033[31m[FAILED]\033[0m line $LINENO: $BASH_COMMAND\nFix the cause and re-run - completed steps are skipped." >&2' ERR
 
-# ---------- settings -------------------------------------------------------------------------
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"            # Infra repo checkout (this script's repo)
-REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-eu-west-1}}"           # Target region
-PREFIX="${PREFIX:-onward-orders-lab}"                              # Naming prefix
-INFRA_REPO="${INFRA_REPO:-AWS-onward-orders-app-infra}"            # Infra repo name
-APP_REPO="${APP_REPO:-AWS-onward-orders-app}"                      # App repo name
-BRANCH="${BRANCH:-main}"                                           # Branch everything follows
-REPO_VISIBILITY="${REPO_VISIBILITY:-public}"                       # New repo visibility
-START_PIPELINE="${START_PIPELINE:-true}"                           # Prove the pipeline once
-WORK_DIR="${WORK_DIR:-$HOME/onward-orders-work}"                   # Rendered copies of both repos
-LOG_FILE="${LOG_FILE:-$HOME/onward-orders-deploy.log}"             # Full log
-BOOTSTRAP_STACK="${PREFIX}-00-bootstrap"                           # One-time CLI stack
-SRC_ACCOUNT="648637468459"                                         # Account hardcoded in the source files
-SRC_REGION="eu-west-1"                                             # Region hardcoded in the source files
-SRC_OWNER="Ndaziramiyep"                                           # GitHub owner hardcoded in the source files
+# Settings, overridable through the environment.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-eu-west-1}}"
+PREFIX="${PREFIX:-onward-orders-lab}"
+INFRA_REPO="${INFRA_REPO:-AWS-onward-orders-app-infra}"
+APP_REPO="${APP_REPO:-AWS-onward-orders-app}"
+BRANCH="${BRANCH:-main}"
+REPO_VISIBILITY="${REPO_VISIBILITY:-public}"
+START_PIPELINE="${START_PIPELINE:-true}"
+WORK_DIR="${WORK_DIR:-$HOME/onward-orders-work}"
+LOG_FILE="${LOG_FILE:-$HOME/onward-orders-deploy.log}"
+BOOTSTRAP_STACK="${PREFIX}-00-bootstrap"
 ASSUME_YES=false
 
+# Values hardcoded in the committed files; render_common rewrites them for the target account.
+SRC_ACCOUNT="648637468459"
+SRC_REGION="eu-west-1"
+SRC_OWNER="Ndaziramiyep"
+
+# Every AWS CLI call targets the chosen region with no pager.
 export AWS_REGION="$REGION" AWS_DEFAULT_REGION="$REGION" AWS_PAGER=""
 
-# ---------- output helpers -------------------------------------------------------------------
+# Terminal colours.
 c_b='\033[1m'; c_g='\033[32m'; c_y='\033[33m'; c_c='\033[36m'; c_0='\033[0m'
+
+# Output helpers: step heading, success, warning, detail, and fatal error.
 step() { echo -e "\n${c_b}${c_c}==> $*${c_0}"; }
 ok()   { echo -e "  ${c_g}✔${c_0} $*"; }
 warn() { echo -e "  ${c_y}!${c_0} $*"; }
 info() { echo -e "    $*"; }
 die()  { echo -e "\033[31m✘ $*\033[0m" >&2; exit 1; }
+
+# Asks for a yes/no answer unless -y was given.
 confirm() {
   $ASSUME_YES && return 0
-  read -r -p "  $1 [y/N] " ans </dev/tty; [[ "$ans" =~ ^[Yy]$ ]]
+  read -r -p "  $1 [y/N] " ans </dev/tty
+  [[ "$ans" =~ ^[Yy]$ ]]
 }
 
-# ---------- AWS helpers ----------------------------------------------------------------------
+# Prints the header comment of this file as help text.
+usage() {
+  awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
+}
+
+# Prints a stack's status, or NOT_FOUND.
 stack_status() {
   aws cloudformation describe-stacks --stack-name "$1" \
     --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo "NOT_FOUND"
 }
+
+# Prints one output value of a stack.
 stack_out() {
   aws cloudformation describe-stacks --stack-name "$1" \
     --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue | [0]" --output text 2>/dev/null || true
 }
+
+# Stops the script unless the stack is CREATE_COMPLETE or UPDATE_COMPLETE.
 require_stack_ok() {
-  local s; s="$(stack_status "$1")"
+  local s
+  s="$(stack_status "$1")"
   [[ "$s" == CREATE_COMPLETE || "$s" == UPDATE_COMPLETE ]] \
     || die "Stack $1 is $s. Check: CloudFormation > $1 > Events (and Git sync tab)."
   ok "$1: $s"
 }
 
-# ---------- GitHub helpers (token is only ever sent to github.com, never stored) -------------
-HAVE_TOKEN=false   # Set by github_login. Without a token, public repos are read anonymously.
-gh_api() {   # gh_api METHOD PATH [JSON]
+# Set to true by github_login when GITHUB_TOKEN is present.
+HAVE_TOKEN=false
+
+# Calls the GitHub REST API: gh_api METHOD PATH [JSON]. The token is only ever sent to github.com.
+gh_api() {
   local args=(-fsS -X "$1" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
   $HAVE_TOKEN && args+=(-H "Authorization: Bearer $GITHUB_TOKEN")
   [[ -n "${3:-}" ]] && args+=(-d "$3")
   curl "${args[@]}" "https://api.github.com$2"
 }
-gh_code() {  # HTTP status only
+
+# Prints only the HTTP status of a GitHub API GET.
+gh_code() {
   local args=(-s -o /dev/null -w '%{http_code}' -H "Accept: application/vnd.github+json")
   $HAVE_TOKEN && args+=(-H "Authorization: Bearer $GITHUB_TOKEN")
   curl "${args[@]}" "https://api.github.com$1"
 }
-git_auth() { # git with the token injected per command (nothing written to .git/config)
-  if ! $HAVE_TOKEN; then git -c credential.helper= "$@"; return; fi
-  local b64; b64="$(printf '%s:%s' "$GITHUB_LOGIN" "$GITHUB_TOKEN" | base64 -w0)"
+
+# Runs git with the token injected per command; nothing is written to .git/config.
+git_auth() {
+  if ! $HAVE_TOKEN; then
+    git -c credential.helper= "$@"
+    return
+  fi
+  local b64
+  b64="$(printf '%s:%s' "$GITHUB_LOGIN" "$GITHUB_TOKEN" | base64 -w0)"
   git -c credential.helper= -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $b64" "$@"
 }
 
-# =============================================================================================
-# 1. Preflight
-# =============================================================================================
+# Step 1: checks tools, AWS credentials and region.
 preflight() {
   step "1. Preflight"
-  for t in aws git jq curl sed base64; do command -v "$t" >/dev/null || die "Missing tool: $t"; done
+  for t in aws git jq curl sed base64; do
+    command -v "$t" >/dev/null || die "Missing tool: $t"
+  done
   [[ -d "$ROOT/templates" && -f "$ROOT/bootstrap/00-gitsync-role.yaml" ]] \
     || die "Run this script from a clone of the infra repo (expected templates/ and bootstrap/ next to it)."
   aws codeconnections help >/dev/null 2>&1 || die "AWS CLI too old for 'codeconnections'. Update the AWS CLI v2."
@@ -130,52 +160,63 @@ preflight() {
   fi
 }
 
+# Identifies the GitHub user from GITHUB_TOKEN, or falls back to anonymous reads of public repos.
 github_login() {
   if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-    GITHUB_LOGIN=""; GITHUB_OWNER="${GITHUB_OWNER:-$SRC_OWNER}"
+    GITHUB_LOGIN=""
+    GITHUB_OWNER="${GITHUB_OWNER:-$SRC_OWNER}"
     ok "No GITHUB_TOKEN: reading public repos of $GITHUB_OWNER anonymously"
     info "If a repo needs a change, the script stops and shows it, so you can push it yourself."
     return
   fi
   HAVE_TOKEN=true
-  local me; me="$(gh_api GET /user)" || die "GitHub token rejected."
+  local me
+  me="$(gh_api GET /user)" || die "GitHub token rejected."
   GITHUB_LOGIN="$(jq -r .login <<<"$me")"
   GITHUB_OWNER="${GITHUB_OWNER:-$GITHUB_LOGIN}"
   GIT_EMAIL="$(jq -r '.id' <<<"$me")+${GITHUB_LOGIN}@users.noreply.github.com"
   ok "GitHub user $GITHUB_LOGIN, repos owner $GITHUB_OWNER"
 }
 
-# =============================================================================================
-# 2. GitHub repositories
-# =============================================================================================
+# Step 2: creates a GitHub repo if it does not exist.
 ensure_repo() {
   local name="$1" desc="$2"
   if [[ "$(gh_code "/repos/$GITHUB_OWNER/$name")" == 200 ]]; then
-    ok "github.com/$GITHUB_OWNER/$name exists"; return
+    ok "github.com/$GITHUB_OWNER/$name exists"
+    return
   fi
   $HAVE_TOKEN || die "github.com/$GITHUB_OWNER/$name not found (or private). Create and push it, or export GITHUB_TOKEN."
-  local private=false; [[ "$REPO_VISIBILITY" == private ]] && private=true
-  local body; body="$(jq -nc --arg n "$name" --arg d "$desc" --argjson p "$private" \
+
+  local private=false
+  [[ "$REPO_VISIBILITY" == private ]] && private=true
+  local body
+  body="$(jq -nc --arg n "$name" --arg d "$desc" --argjson p "$private" \
     '{name:$n, description:$d, private:$p, auto_init:false}')"
-  if [[ "$GITHUB_OWNER" == "$GITHUB_LOGIN" ]]; then gh_api POST /user/repos "$body" >/dev/null
-  else gh_api POST "/orgs/$GITHUB_OWNER/repos" "$body" >/dev/null; fi
+  if [[ "$GITHUB_OWNER" == "$GITHUB_LOGIN" ]]; then
+    gh_api POST /user/repos "$body" >/dev/null
+  else
+    gh_api POST "/orgs/$GITHUB_OWNER/repos" "$body" >/dev/null
+  fi
   ok "Created github.com/$GITHUB_OWNER/$name ($REPO_VISIBILITY)"
 }
 
-# Clones a repo fresh from GitHub, renders the account-specific values, and pushes only if
-# that changed something. Sets PUSHED_NEW_COMMIT=true|false.
+# Clones a repo fresh, renders account-specific values, and pushes only if that changed something. Sets PUSHED_NEW_COMMIT=true|false.
 publish_repo() {
   local name="$1" render_fn="$2" check="$3" dir="$WORK_DIR/$1"
   local url="https://github.com/$GITHUB_OWNER/$name.git"
+
   rm -rf "$dir"
   git_auth ls-remote --exit-code --heads "$url" "$BRANCH" >/dev/null 2>&1 \
     || die "$url has no '$BRANCH' branch. Push your code to it first, then re-run."
   git_auth clone -q --branch "$BRANCH" "$url" "$dir"
   [[ -e "$dir/$check" ]] || die "$name does not look right: '$check' is missing at the repo root."
+
   "$render_fn" "$dir"
   git -C "$dir" add -A
+
   if git -C "$dir" diff --cached --quiet; then
-    PUSHED_NEW_COMMIT=false; ok "$name already has this account's values"
+    PUSHED_NEW_COMMIT=false
+    ok "$name already has this account's values"
   elif ! $HAVE_TOKEN; then
     warn "$name needs these account-specific changes, and GitSync reads them from GitHub:"
     git -C "$dir" --no-pager diff --cached
@@ -184,14 +225,18 @@ publish_repo() {
     git -C "$dir" -c user.name="$GITHUB_LOGIN" -c user.email="$GIT_EMAIL" \
       commit -q -m "chore: set account values for $ACCOUNT_ID / $REGION"
     git_auth -C "$dir" push -q origin "$BRANCH"
-    PUSHED_NEW_COMMIT=true; ok "Pushed $name -> $url  (run 'git pull' in your local clone)"
+    PUSHED_NEW_COMMIT=true
+    ok "Pushed $name -> $url  (run 'git pull' in your local clone)"
   fi
 }
 
-# Replace account / region / owner placeholders that are hardcoded in the source files.
-render_common() {   # render_common DIR 'glob' ['glob' ...]  (globs are relative to DIR)
-  local dir="$1"; shift
-  ( cd "$dir"; shopt -s nullglob
+# Rewrites the hardcoded account, region and owner in the given globs: render_common DIR 'glob' ['glob' ...].
+render_common() {
+  local dir="$1"
+  shift
+  (
+    cd "$dir"
+    shopt -s nullglob
     local pat f
     for pat in "$@"; do
       for f in $pat; do
@@ -199,39 +244,39 @@ render_common() {   # render_common DIR 'glob' ['glob' ...]  (globs are relative
                -e "s/$SRC_REGION/$REGION/g" \
                -e "s#github.com/$SRC_OWNER/#github.com/$GITHUB_OWNER/#g" "$f"
       done
-    done )
+    done
+  )
 }
 
+# Renders the infra repo's deployment files. An account holds only one GitHub OIDC provider, so an existing one is reused.
 render_infra() {
   local d="$1"
-  render_common "$d" 'deployments/*.deployment.yaml' 'scripts/*.sh' '.github/workflows/*.yaml' README.md
+  local foundation="$d/deployments/01-foundation.deployment.yaml"
+  local network="$d/deployments/02-network.deployment.yaml"
+  local delivery="$d/deployments/06-delivery.deployment.yaml"
 
-  # GitHub owner of the app repo (OIDC trust + pipeline source)
-  sed -i "s/^\(  GitHubOrg:\) *[^ #]*/\1 $GITHUB_OWNER/" "$d/deployments/01-foundation.deployment.yaml" \
-                                                        "$d/deployments/06-delivery.deployment.yaml"
-  sed -i "s/^\(  AppRepo:\) *[^ #]*/\1 $APP_REPO/"      "$d/deployments/01-foundation.deployment.yaml" \
-                                                        "$d/deployments/06-delivery.deployment.yaml"
-  sed -i "s/^\(  AppBranch:\) *[^ #]*/\1 $BRANCH/"      "$d/deployments/01-foundation.deployment.yaml" \
-                                                        "$d/deployments/06-delivery.deployment.yaml"
-  # GitHub connection from the bootstrap stack
-  sed -i "s#^  ConnectionArn: .*#  ConnectionArn: $CONNECTION_ARN  \# GitHub connection (bootstrap output)#" \
-    "$d/deployments/06-delivery.deployment.yaml"
-  # Regional S3 prefix list (tasks reach ECR layers in S3 through the gateway endpoint)
-  sed -i "s/^\(  S3PrefixListId:\) *[^ #]*/\1 $S3_PREFIX_LIST/" "$d/deployments/02-network.deployment.yaml"
-  # An account can only hold one GitHub OIDC provider: reuse it if it already exists
+  render_common "$d" 'deployments/*.deployment.yaml' '.github/workflows/*.yaml' README.md
+
+  sed -i "s/^\(  GitHubOrg:\) *[^ #]*/\1 $GITHUB_OWNER/" "$foundation" "$delivery"
+  sed -i "s/^\(  AppRepo:\) *[^ #]*/\1 $APP_REPO/"      "$foundation" "$delivery"
+  sed -i "s/^\(  AppBranch:\) *[^ #]*/\1 $BRANCH/"      "$foundation" "$delivery"
+  sed -i "s#^  ConnectionArn: .*#  ConnectionArn: $CONNECTION_ARN#" "$delivery"
+  sed -i "s/^\(  S3PrefixListId:\) *[^ #]*/\1 $S3_PREFIX_LIST/" "$network"
+
   if [[ -n "$OIDC_REUSE_ARN" ]]; then
-    sed -i "/^  ShaImagesToKeep:/a\\  ExistingOidcProviderArn: $OIDC_REUSE_ARN  # Provider already in the account, reused" \
-      "$d/deployments/01-foundation.deployment.yaml"
+    sed -i "/^  ShaImagesToKeep:/a\\  ExistingOidcProviderArn: $OIDC_REUSE_ARN" "$foundation"
   fi
 }
 
+# Renders the app repo's task definition and workflow.
 render_app() {
   local d="$1"
   render_common "$d" taskdef.json '.github/workflows/*.yaml' README.md
-  sed -i "s/^\(  ECR_REPOSITORY:\) *[^ #]*/\1 $PREFIX/" "$d/.github/workflows/build-push.yaml"
+  sed -i -e "s/^\(  ECR_REPOSITORY:\) *[^ #]*/\1 $PREFIX/" \
+         -e "s/^\(  PIPELINE_NAME:\) *[^ #]*/\1 $PREFIX-pipeline/" "$d/.github/workflows/build-push.yaml"
 }
 
-# Values the renderers need
+# Finds the regional S3 prefix list and whether to reuse an OIDC provider (only if the foundation stack did not create it, since flipping the condition would delete it).
 discover_values() {
   S3_PREFIX_LIST="$(aws ec2 describe-managed-prefix-lists \
     --filters "Name=prefix-list-name,Values=com.amazonaws.$REGION.s3" \
@@ -242,33 +287,36 @@ discover_values() {
   OIDC_REUSE_ARN=""
   local arn="arn:aws:iam::$ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
   if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "$arn" >/dev/null 2>&1; then
-    # Reuse only if the foundation stack did NOT create it (flipping the condition would delete it)
     if ! aws cloudformation describe-stack-resource --stack-name "$PREFIX-01-foundation" \
          --logical-resource-id GitHubOidcProvider >/dev/null 2>&1; then
-      OIDC_REUSE_ARN="$arn"; ok "GitHub OIDC provider already exists - will be reused"
+      OIDC_REUSE_ARN="$arn"
+      ok "GitHub OIDC provider already exists - will be reused"
     else
       ok "GitHub OIDC provider is owned by the foundation stack"
     fi
   fi
 }
 
-# =============================================================================================
-# 3-4. Bootstrap stack + GitHub connection
-# =============================================================================================
+# Steps 3-4: deploys the bootstrap stack and waits for the GitHub connection. On re-runs, unpassed parameters keep their values, so the connection condition never flips.
 bootstrap() {
   step "3. Bootstrap stack ($BOOTSTRAP_STACK)"
   local overrides=(ResourcePrefix="$PREFIX")
+
   if [[ "$(stack_status "$BOOTSTRAP_STACK")" == NOT_FOUND ]]; then
     local existing="${CONNECTION_ARN:-}"
-    if [[ -z "$existing" ]]; then   # Reuse an authorised GitHub connection if there is one
+    if [[ -z "$existing" ]]; then
       existing="$(aws codeconnections list-connections --provider-type-filter GitHub \
         --query "Connections[?ConnectionStatus=='AVAILABLE'].ConnectionArn | [0]" --output text 2>/dev/null || true)"
-      if [[ "$existing" == None ]]; then existing=""; fi
-      if [[ -n "$existing" ]]; then ok "Reusing AVAILABLE GitHub connection $existing"; fi
+      if [[ "$existing" == None ]]; then
+        existing=""
+      fi
+      if [[ -n "$existing" ]]; then
+        ok "Reusing AVAILABLE GitHub connection $existing"
+      fi
     fi
     overrides+=(ExistingConnectionArn="$existing")
   fi
-  # On re-runs, parameters not passed keep their previous values (never flips the connection condition)
+
   aws cloudformation deploy \
     --stack-name "$BOOTSTRAP_STACK" \
     --template-file "$ROOT/bootstrap/00-gitsync-role.yaml" \
@@ -278,6 +326,7 @@ bootstrap() {
     --tags Project=onward-orders Environment=lab Owner=patrick-ndaziramiye \
            CostCenter=amalitech-training ManagedBy=cloudformation Repository="$INFRA_REPO" >/dev/null
   require_stack_ok "$BOOTSTRAP_STACK"
+
   CONNECTION_ARN="$(stack_out "$BOOTSTRAP_STACK" ConnectionArn)"
   GITSYNC_ROLE_ARN="$(stack_out "$BOOTSTRAP_STACK" GitSyncRoleArn)"
   info "GitSync role: $GITSYNC_ROLE_ARN"
@@ -288,7 +337,10 @@ bootstrap() {
   for _ in $(seq 1 120); do
     status="$(aws codeconnections get-connection --connection-arn "$CONNECTION_ARN" \
       --query Connection.ConnectionStatus --output text)"
-    if [[ "$status" == AVAILABLE ]]; then ok "Connection is AVAILABLE"; break; fi
+    if [[ "$status" == AVAILABLE ]]; then
+      ok "Connection is AVAILABLE"
+      break
+    fi
     if ! $shown; then
       warn "Connection is $status. ONE-TIME MANUAL STEP (the only console action in this lab):"
       info "1. Open https://$REGION.console.aws.amazon.com/codesuite/settings/connections?region=$REGION"
@@ -303,28 +355,89 @@ bootstrap() {
   [[ "$status" == AVAILABLE ]] || die "Connection still $status. Authorize it, then re-run."
 }
 
-# =============================================================================================
-# 6 / 9. GitSync stacks (reuses the repo's own scripts/gitsync-setup.sh)
-# =============================================================================================
-gitsync() {
-  local names=("$@")
-  ( cd "$WORK_DIR/$INFRA_REPO" && \
-    AWS_REGION="$REGION" PREFIX="$PREFIX" GITHUB_OWNER="$GITHUB_OWNER" INFRA_REPO="$INFRA_REPO" BRANCH="$BRANCH" \
-    bash scripts/gitsync-setup.sh "${names[@]}" )
-  local n; for n in "${names[@]}"; do require_stack_ok "$PREFIX-$n"; done
+# Prints "Key=Value" for each entry of a top-level section (parameters or tags) of a deployment file.
+deployment_section() {
+  awk -v sec="$1" '
+    $0 ~ "^"sec":" { on = 1; next }
+    /^[^ #]/       { on = 0 }
+    on && /^  [A-Za-z0-9]+:/ {
+      line = $0; sub(/[ \t]+#.*$/, "", line); sub(/^  /, "", line)
+      key = line; sub(/:.*/, "", key)
+      val = line; sub(/^[^:]*:[ \t]*/, "", val); gsub(/^"|"$/, "", val)
+      print key "=" val
+    }' "$2"
 }
 
-# =============================================================================================
-# 7-8. First image through GitHub Actions (OIDC)
-# =============================================================================================
+# Steps 6 and 9: hands each named stack to GitSync, in order, and waits for it.
+# GitSync only updates stacks, so a missing stack is created once from its deployment file
+# (same template, parameters and tags). Existing stacks and sync configurations are reused.
+gitsync() {
+  local n stack file tpl link_id params tags
+  link_id="$(aws codeconnections list-repository-links \
+    --query "RepositoryLinks[?OwnerId=='$GITHUB_OWNER' && RepositoryName=='$INFRA_REPO'].RepositoryLinkId | [0]" --output text)"
+  if [[ -z "$link_id" || "$link_id" == None ]]; then
+    link_id="$(aws codeconnections create-repository-link --connection-arn "$CONNECTION_ARN" \
+      --owner-id "$GITHUB_OWNER" --repository-name "$INFRA_REPO" \
+      --query RepositoryLinkInfo.RepositoryLinkId --output text)"
+  fi
+
+  for n in "$@"; do
+    stack="$PREFIX-$n"
+    file="$WORK_DIR/$INFRA_REPO/deployments/$n.deployment.yaml"
+
+    if [[ "$(stack_status "$stack")" == NOT_FOUND ]]; then
+      tpl="$(awk '/^template-file-path:/ { sub(/[ \t]+#.*$/, ""); print $2 }' "$file")"
+      mapfile -t params < <(deployment_section parameters "$file")
+      mapfile -t tags < <(deployment_section tags "$file")
+      info "Creating $stack from $tpl (GitSync manages every update after this)"
+      aws cloudformation deploy --stack-name "$stack" \
+        --template-file "$WORK_DIR/$INFRA_REPO/$tpl" \
+        --role-arn "$GITSYNC_ROLE_ARN" \
+        --capabilities CAPABILITY_NAMED_IAM \
+        --parameter-overrides "${params[@]}" \
+        --tags "${tags[@]}" >/dev/null
+    fi
+
+    if ! aws codeconnections get-sync-configuration --sync-type CFN_STACK_SYNC --resource-name "$stack" >/dev/null 2>&1; then
+      aws codeconnections create-sync-configuration \
+        --branch "$BRANCH" \
+        --config-file "deployments/$n.deployment.yaml" \
+        --repository-link-id "$link_id" \
+        --resource-name "$stack" \
+        --role-arn "$GITSYNC_ROLE_ARN" \
+        --sync-type CFN_STACK_SYNC \
+        --publish-deployment-status ENABLED \
+        --trigger-resource-update-on FILE_CHANGE >/dev/null
+      ok "GitSync attached to $stack"
+    fi
+
+    # A sync may still be running; wait for the stack to settle before the next one needs it.
+    local status
+    for _ in $(seq 1 120); do
+      status="$(stack_status "$stack")"
+      [[ "$status" == *_IN_PROGRESS ]] || break
+      sleep 15
+    done
+    require_stack_ok "$stack"
+  done
+}
+
+# Succeeds when the :latest image is in ECR.
 image_exists() {
   aws ecr describe-images --repository-name "$PREFIX" --image-ids imageTag=latest >/dev/null 2>&1
 }
+
+# Steps 7-8: publishes the app repo and waits for GitHub Actions to push the first image.
 first_image() {
   step "7. Publish app repo (GitHub Actions builds the first image)"
   publish_repo "$APP_REPO" render_app .github/workflows/build-push.yaml
+
   step "8. Wait for $PREFIX:latest in ECR"
-  if image_exists; then ok "Image already in ECR"; return; fi
+  if image_exists; then
+    ok "Image already in ECR"
+    return
+  fi
+
   if ! $PUSHED_NEW_COMMIT && $HAVE_TOKEN; then
     info "No new commit was pushed - triggering the workflow with workflow_dispatch"
     gh_api POST "/repos/$GITHUB_OWNER/$APP_REPO/actions/workflows/build-push.yaml/dispatches" \
@@ -333,14 +446,19 @@ first_image() {
     warn "Start the first image build yourself (the foundation stack now trusts GitHub Actions):"
     info "https://github.com/$GITHUB_OWNER/$APP_REPO/actions/workflows/build-push.yaml > Run workflow > main"
   fi
+
   info "Watch: https://github.com/$GITHUB_OWNER/$APP_REPO/actions"
-  for _ in $(seq 1 80); do image_exists && { ok "Image pushed by GitHub Actions"; return; }; sleep 15; done
+  for _ in $(seq 1 80); do
+    if image_exists; then
+      ok "Image pushed by GitHub Actions"
+      return
+    fi
+    sleep 15
+  done
   die "No :latest image after 20 min. Check the Actions run (OIDC role trust, test failures), then re-run."
 }
 
-# =============================================================================================
-# 10. Verification
-# =============================================================================================
+# Step 10: checks service stability, ALB health, no NAT, no default route and no inline policies. Polls counts because 'aws ecs wait services-stable' breaks on CODE_DEPLOY services.
 verify() {
   step "10. Verify"
   local alb vpc subnets cluster service
@@ -350,18 +468,23 @@ verify() {
   cluster="$(stack_out "$PREFIX-04-ecs" ClusterName)"
   service="$(stack_out "$PREFIX-04-ecs" ServiceName)"
 
-  # 'aws ecs wait services-stable' breaks on CODE_DEPLOY-controlled services, so poll the counts
   info "Waiting for the ECS service to be stable..."
   local counts r d p stable=false
   for _ in $(seq 1 40); do
     counts="$(aws ecs describe-services --cluster "$cluster" --services "$service" \
       --query 'services[0].[runningCount,desiredCount,pendingCount]' --output text)"
     read -r r d p <<<"$counts"
-    if [[ "$d" -gt 0 && "$r" == "$d" && "$p" == 0 ]]; then stable=true; break; fi
+    if [[ "$d" -gt 0 && "$r" == "$d" && "$p" == 0 ]]; then
+      stable=true
+      break
+    fi
     sleep 15
   done
-  $stable && ok "ECS service $service is stable ($r/$d running)" \
-          || warn "Service not stable yet ($counts running/desired/pending) - check ECS > $cluster > $service > Events"
+  if $stable; then
+    ok "ECS service $service is stable ($r/$d running)"
+  else
+    warn "Service not stable yet ($counts running/desired/pending) - check ECS > $cluster > $service > Events"
+  fi
 
   local running azs
   running="$(aws ecs describe-services --cluster "$cluster" --services "$service" \
@@ -374,33 +497,56 @@ verify() {
   local code
   for _ in $(seq 1 20); do
     code="$(curl -s -o /dev/null -w '%{http_code}' "http://$alb/health" || true)"
-    [[ "$code" == 200 ]] && break; sleep 10
+    [[ "$code" == 200 ]] && break
+    sleep 10
   done
-  [[ "$code" == 200 ]] && ok "http://$alb/health -> 200" || warn "http://$alb/health -> $code (targets may still be registering)"
+  if [[ "$code" == 200 ]]; then
+    ok "http://$alb/health -> 200"
+  else
+    warn "http://$alb/health -> $code (targets may still be registering)"
+  fi
   info "Version: $(curl -s "http://$alb/version" || echo n/a)"
 
   local nats routes
   nats="$(aws ec2 describe-nat-gateways --filter "Name=vpc-id,Values=$vpc" "Name=state,Values=pending,available" \
     --query 'length(NatGateways)' --output text)"
-  [[ "$nats" == 0 ]] && ok "No NAT gateway in $vpc" || warn "$nats NAT gateway(s) found in $vpc"
+  if [[ "$nats" == 0 ]]; then
+    ok "No NAT gateway in $vpc"
+  else
+    warn "$nats NAT gateway(s) found in $vpc"
+  fi
+
   routes="$(aws ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$subnets" \
     --query 'length(RouteTables[].Routes[?DestinationCidrBlock==`0.0.0.0/0`][])' --output text)"
-  [[ "$routes" == 0 ]] && ok "Private route tables have no 0.0.0.0/0 route" || warn "Default route found in private route tables"
+  if [[ "$routes" == 0 ]]; then
+    ok "Private route tables have no 0.0.0.0/0 route"
+  else
+    warn "Default route found in private route tables"
+  fi
 
-  local inline=0 r
-  for r in $(aws iam list-roles --query "Roles[?starts_with(RoleName, '$PREFIX')].RoleName" --output text); do
-    (( inline += $(aws iam list-role-policies --role-name "$r" --query 'length(PolicyNames)' --output text) )) || true
+  local inline=0 role
+  for role in $(aws iam list-roles --query "Roles[?starts_with(RoleName, '$PREFIX')].RoleName" --output text); do
+    (( inline += $(aws iam list-role-policies --role-name "$role" --query 'length(PolicyNames)' --output text) )) || true
   done
-  [[ "$inline" == 0 ]] && ok "No inline IAM policies on $PREFIX-* roles" || warn "$inline inline policies found"
-  local keys; keys="$(aws iam list-users --query 'length(Users)' --output text)"
-  info "IAM users in account: $keys (GitHub uses OIDC, no access keys)"
+  if [[ "$inline" == 0 ]]; then
+    ok "No inline IAM policies on $PREFIX-* roles"
+  else
+    warn "$inline inline policies found"
+  fi
+
+  local users
+  users="$(aws iam list-users --query 'length(Users)' --output text)"
+  info "IAM users in account: $users (GitHub uses OIDC, no access keys)"
 }
 
+# Runs the release pipeline once if it has never run.
 start_pipeline() {
   [[ "$START_PIPELINE" == true ]] || return 0
   local p="$PREFIX-pipeline"
-  if [[ "$(aws codepipeline list-pipeline-executions --pipeline-name "$p" \
-        --query 'length(pipelineExecutionSummaries)' --output text 2>/dev/null || echo 0)" == 0 ]]; then
+  local runs
+  runs="$(aws codepipeline list-pipeline-executions --pipeline-name "$p" \
+    --query 'length(pipelineExecutionSummaries)' --output text 2>/dev/null || echo 0)"
+  if [[ "$runs" == 0 ]]; then
     aws codepipeline start-pipeline-execution --name "$p" --query pipelineExecutionId --output text >/dev/null
     ok "Started first pipeline run (blue/green canary takes ~10-15 min)"
   else
@@ -409,9 +555,11 @@ start_pipeline() {
   info "https://$REGION.console.aws.amazon.com/codesuite/codepipeline/pipelines/$p/view?region=$REGION"
 }
 
+# Prints URLs and demo commands.
 summary() {
   step "Done"
-  local alb; alb="$(stack_out "$PREFIX-03-alb" LoadBalancerDnsName)"
+  local alb
+  alb="$(stack_out "$PREFIX-03-alb" LoadBalancerDnsName)"
   cat <<EOF
   Application:   http://$alb
   Infra repo:    https://github.com/$GITHUB_OWNER/$INFRA_REPO
@@ -425,16 +573,16 @@ summary() {
   Bad release:   set FORCE_UNHEALTHY = True and publish -> CodeDeploy rolls back
   Zero downtime: while true; do curl -s http://$alb/version; echo; sleep 1; done
   Scale demo:    for i in \$(seq 200); do curl -s "http://$alb/cpu?seconds=1" >/dev/null & done
+  Release check: the app's GitHub Actions run stays yellow until CodeDeploy finishes, green = live for everyone
   Idle / clean:  bash cloudshell-deploy.sh teardown
 EOF
 }
 
-# =============================================================================================
-# Commands
-# =============================================================================================
+# Full deployment, steps 1-10.
 cmd_deploy() {
   preflight
   github_login
+
   step "Plan"
   info "Use GitHub repos $GITHUB_OWNER/$INFRA_REPO and $GITHUB_OWNER/$APP_REPO (created $REPO_VISIBILITY if missing)"
   info "Deploy stacks $PREFIX-00 .. 06 in $REGION / account $ACCOUNT_ID (ALB + endpoints + Fargate bill hourly)"
@@ -463,35 +611,46 @@ cmd_deploy() {
   summary
 }
 
+# Re-renders and pushes both repos only.
 cmd_publish() {
-  preflight; github_login
+  preflight
+  github_login
   [[ "$(stack_status "$BOOTSTRAP_STACK")" != NOT_FOUND ]] || die "Run a full deploy first."
   CONNECTION_ARN="$(stack_out "$BOOTSTRAP_STACK" ConnectionArn)"
   discover_values
-  step "Publish infra repo"; publish_repo "$INFRA_REPO" render_infra deployments/01-foundation.deployment.yaml
-  step "Publish app repo";   publish_repo "$APP_REPO" render_app .github/workflows/build-push.yaml
+
+  step "Publish infra repo"
+  publish_repo "$INFRA_REPO" render_infra deployments/01-foundation.deployment.yaml
+  step "Publish app repo"
+  publish_repo "$APP_REPO" render_app .github/workflows/build-push.yaml
+
   if $PUSHED_NEW_COMMIT; then
     info "GitHub Actions -> ECR -> EventBridge -> CodePipeline will release it."
   fi
 }
 
+# Prints stack statuses, the ALB URL and the last pipeline run.
 cmd_status() {
   preflight
+
   step "Stacks"
   local n
   for n in 00-bootstrap 01-foundation 02-network 03-alb 04-ecs 05-autoscaling 06-delivery; do
     printf "    %-34s %s\n" "$PREFIX-$n" "$(stack_status "$PREFIX-$n")"
   done
+
   step "Endpoints"
   info "ALB: http://$(stack_out "$PREFIX-03-alb" LoadBalancerDnsName)"
   info "Last pipeline run: $(aws codepipeline list-pipeline-executions --pipeline-name "$PREFIX-pipeline" \
     --max-items 1 --query 'pipelineExecutionSummaries[0].[status,lastUpdateTime]' --output text 2>/dev/null || echo n/a)"
 }
 
+# Deletes every object version so CloudFormation can delete the versioned artifact bucket.
 empty_bucket() {
   local b="$1" json objs
   [[ -n "$b" && "$b" != None ]] || return 0
   aws s3api head-bucket --bucket "$b" 2>/dev/null || return 0
+
   info "Emptying versioned bucket $b"
   while :; do
     json="$(aws s3api list-object-versions --bucket "$b" --max-items 1000 --output json)"
@@ -501,32 +660,54 @@ empty_bucket() {
   done
 }
 
+# Deletes stacks 06 -> 01 so an idle environment costs nothing. 'deploy' rebuilds it from the repos.
+# Each GitSync configuration is removed first, otherwise GitSync could act on the stack again.
 cmd_teardown() {
   preflight
   warn "This deletes stacks $PREFIX-06 .. 01 in $REGION (GitHub repos are kept)."
   if [[ "${KEEP_BOOTSTRAP:-true}" == false ]]; then
-    warn "KEEP_BOOTSTRAP=false: the bootstrap stack is deleted too."
+    warn "KEEP_BOOTSTRAP=false: the bootstrap stack and GitHub connection are deleted too."
   fi
   confirm "Delete the environment?" || die "Cancelled."
-  empty_bucket "$(stack_out "$PREFIX-06-delivery" ArtifactBucketName)"
-  AWS_REGION="$REGION" PREFIX="$PREFIX" KEEP_BOOTSTRAP="${KEEP_BOOTSTRAP:-true}" \
-    bash "$ROOT/scripts/teardown.sh"
+
+  local n stack
+  for n in 06-delivery 05-autoscaling 04-ecs 03-alb 02-network 01-foundation; do
+    stack="$PREFIX-$n"
+    aws codeconnections delete-sync-configuration --sync-type CFN_STACK_SYNC --resource-name "$stack" 2>/dev/null || true
+    [[ "$(stack_status "$stack")" != NOT_FOUND ]] || continue
+    if [[ "$n" == 06-delivery ]]; then
+      empty_bucket "$(stack_out "$stack" ArtifactBucketName)"
+    fi
+    info "Deleting $stack"
+    aws cloudformation delete-stack --stack-name "$stack"
+    aws cloudformation wait stack-delete-complete --stack-name "$stack"
+    ok "Deleted $stack"
+  done
+
+  if [[ "${KEEP_BOOTSTRAP:-true}" == false ]]; then
+    aws cloudformation delete-stack --stack-name "$BOOTSTRAP_STACK"
+    aws cloudformation wait stack-delete-complete --stack-name "$BOOTSTRAP_STACK"
+    ok "Deleted $BOOTSTRAP_STACK"
+  fi
+  ok "Teardown complete. ALB, endpoints and Fargate no longer bill."
 }
 
-# ---------- entry point ----------------------------------------------------------------------
+# Parses the command and flags.
 CMD="deploy"
 for a in "$@"; do
   case "$a" in
     -y|--yes) ASSUME_YES=true ;;
     deploy|publish|status|verify|teardown) CMD="$a" ;;
-    -h|--help) sed -n '2,46p' "$0"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     *) die "Unknown argument: $a (try --help)" ;;
   esac
 done
 
+# Logs everything to LOG_FILE and runs the chosen command.
 mkdir -p "$WORK_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "---- $(date -u +%FT%TZ) cloudshell-deploy.sh $CMD ----"
+
 case "$CMD" in
   deploy)   cmd_deploy ;;
   publish)  cmd_publish ;;
