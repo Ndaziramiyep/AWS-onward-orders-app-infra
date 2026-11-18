@@ -71,7 +71,7 @@ Resources:
         - !Ref AWS::NoValue
 
   # Scales on CPU. ALBRequestCountPerTarget is not used: blue/green swaps target groups, so it would go stale.
-  CpuTargetTrackingPolicy:
+  CpuScalingPolicy:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
     Properties:
       PolicyName: !Sub ${ResourcePrefix}-cpu-target-tracking
@@ -85,7 +85,7 @@ Resources:
         ScaleInCooldown: !Ref ScaleInCooldown
 
   # Scales on memory.
-  MemoryTargetTrackingPolicy:
+  MemoryScalingPolicy:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
     Properties:
       PolicyName: !Sub ${ResourcePrefix}-memory-target-tracking

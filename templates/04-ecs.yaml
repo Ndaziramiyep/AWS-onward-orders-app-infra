@@ -84,7 +84,7 @@ Resources:
         - { Key: Name, Value: !Sub "${ResourcePrefix}-task-exec-role" }
 
   # Application permissions: none today, with an explicit deny on privilege escalation.
-  TaskRolePolicy:
+  TaskPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: !Sub ${ResourcePrefix}-task-role-policy
@@ -116,7 +116,7 @@ Resources:
               StringEquals:
                 aws:SourceAccount: !Ref AWS::AccountId
       ManagedPolicyArns:
-        - !Ref TaskRolePolicy
+        - !Ref TaskPolicy
       Tags:
         - { Key: Name, Value: !Sub "${ResourcePrefix}-task-role" }
 

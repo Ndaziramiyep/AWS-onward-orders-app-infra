@@ -102,7 +102,7 @@ Resources:
                 aws:SecureTransport: "false"
 
   # Rolls back a deployment when the app returns 5XX errors.
-  Target5xxAlarm:
+  ErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub ${ResourcePrefix}-alb-target-5xx
@@ -120,7 +120,7 @@ Resources:
       TreatMissingData: notBreaching
 
   # Rolls back a deployment when blue tasks become unhealthy.
-  BlueUnhealthyHostsAlarm:
+  BlueUnhealthyAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub ${ResourcePrefix}-tg-blue-unhealthy
@@ -141,7 +141,7 @@ Resources:
       TreatMissingData: notBreaching
 
   # Rolls back a deployment when green tasks become unhealthy.
-  GreenUnhealthyHostsAlarm:
+  GreenUnhealthyAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub ${ResourcePrefix}-tg-green-unhealthy
@@ -162,7 +162,7 @@ Resources:
       TreatMissingData: notBreaching
 
   # Role CodeDeploy uses for ECS blue/green deployments.
-  CodeDeployServiceRole:
+  CodeDeployRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub ${ResourcePrefix}-codedeploy-role
@@ -196,7 +196,7 @@ Resources:
     Properties:
       ApplicationName: !Ref CodeDeployApplication
       DeploymentGroupName: !Sub ${ResourcePrefix}-dg
-      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
       DeploymentConfigName: !Ref DeploymentConfigName
       DeploymentStyle:
         DeploymentType: BLUE_GREEN
@@ -232,9 +232,9 @@ Resources:
         Enabled: true
         IgnorePollAlarmFailure: false
         Alarms:
-          - Name: !Ref Target5xxAlarm
-          - Name: !Ref BlueUnhealthyHostsAlarm
-          - Name: !Ref GreenUnhealthyHostsAlarm
+          - Name: !Ref ErrorAlarm
+          - Name: !Ref BlueUnhealthyAlarm
+          - Name: !Ref GreenUnhealthyAlarm
       Tags:
         - { Key: Name, Value: !Sub "${ResourcePrefix}-dg" }
 
@@ -379,7 +379,7 @@ Resources:
         - { Key: Name, Value: !Sub "${ResourcePrefix}-pipeline" }
 
   # Lets EventBridge start this pipeline and nothing else.
-  EventsInvokePipelinePolicy:
+  EventBridgePolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: !Sub ${ResourcePrefix}-events-start-pipeline-policy
@@ -392,7 +392,7 @@ Resources:
             Resource: !Sub arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}
 
   # Role EventBridge assumes to start the pipeline.
-  EventsInvokePipelineRole:
+  EventBridgeRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub ${ResourcePrefix}-events-pipeline-role
@@ -407,12 +407,12 @@ Resources:
               StringEquals:
                 aws:SourceAccount: !Ref AWS::AccountId
       ManagedPolicyArns:
-        - !Ref EventsInvokePipelinePolicy
+        - !Ref EventBridgePolicy
       Tags:
         - { Key: Name, Value: !Sub "${ResourcePrefix}-events-pipeline-role" }
 
   # Starts the pipeline when an image with the watched tag is pushed.
-  EcrPushRule:
+  ImagePushRule:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub ${ResourcePrefix}-ecr-push-to-pipeline
@@ -435,7 +435,7 @@ Resources:
       Targets:
         - Id: StartPipeline
           Arn: !Sub arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}
-          RoleArn: !GetAtt EventsInvokePipelineRole.Arn
+          RoleArn: !GetAtt EventBridgeRole.Arn
 
 Outputs:
   PipelineName:

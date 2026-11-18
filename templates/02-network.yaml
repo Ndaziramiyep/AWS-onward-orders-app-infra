@@ -123,7 +123,7 @@ Resources:
         - { Key: Name, Value: !Sub "${ResourcePrefix}-public-rt" }
 
   # Internet route for the public subnets.
-  PublicDefaultRoute:
+  PublicInternetRoute:
     Type: AWS::EC2::Route
     DependsOn: InternetGatewayAttachment
     Properties:

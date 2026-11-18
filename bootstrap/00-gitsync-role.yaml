@@ -69,7 +69,7 @@ Resources:
             Resource: "*"
 
   # Permissions CloudFormation needs to build stacks 01-06. Resource is "*" where ARNs do not exist until creation.
-  StackDeployPolicy:
+  GitSyncDeployPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: !Sub ${ResourcePrefix}-gitsync-deploy-policy
@@ -182,7 +182,7 @@ Resources:
                 aws:SourceAccount: !Ref AWS::AccountId
       ManagedPolicyArns:
         - !Ref GitSyncPolicy
-        - !Ref StackDeployPolicy
+        - !Ref GitSyncDeployPolicy
 
 Outputs:
   GitSyncRoleArn:

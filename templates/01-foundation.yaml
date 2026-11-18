@@ -88,7 +88,7 @@ Resources:
         - { Key: Name, Value: !Ref ResourcePrefix }
 
   # Push access to this repository only.
-  EcrPushPolicy:
+  GitHubActionsPushPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: !Sub ${ResourcePrefix}-github-ecr-push-policy
@@ -114,7 +114,7 @@ Resources:
 
   # Read-only view of the release pipeline, so the app workflow can wait for the AWS release to finish.
   # The pipeline is created later by the 06 delivery stack, so its ARN is built from the naming convention.
-  ReleaseStatusPolicy:
+  GitHubActionsReleasePolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
       ManagedPolicyName: !Sub ${ResourcePrefix}-github-release-status-policy
@@ -152,8 +152,8 @@ Resources:
                   - !Sub repo:${GitHubOrg}/${AppRepo}:ref:refs/heads/${AppBranch}
                   - !Sub repo:${GitHubOrg}@*/${AppRepo}@*:ref:refs/heads/${AppBranch}
       ManagedPolicyArns:
-        - !Ref EcrPushPolicy
-        - !Ref ReleaseStatusPolicy
+        - !Ref GitHubActionsPushPolicy
+        - !Ref GitHubActionsReleasePolicy
       Tags:
         - { Key: Name, Value: !Sub "${ResourcePrefix}-github-actions-role" }
 
