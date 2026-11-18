@@ -20,9 +20,7 @@ The application (Flask code, Dockerfile, CI workflow, `appspec.yaml`, `taskdef.j
 10. [Rebuild by hand](#10-rebuild-by-hand)
 11. [Release, rollback, and idle](#11-release-rollback-and-idle)
 12. [Cost in one table](#12-cost-in-one-table)
-13. [Problems we hit and how they were fixed](#13-problems-we-hit-and-how-they-were-fixed)
-14. [Things a new engineer must know](#14-things-a-new-engineer-must-know)
-15. [Presenting this project](#15-presenting-this-project)
+13. [Things a new engineer must know](#13-things-a-new-engineer-must-know)
 
 ---
 
@@ -94,7 +92,7 @@ The lab also sets hard rules:
 
 **In one sentence:** a merge to `main` builds an image without any stored keys. The new image starts a pipeline, and the pipeline shifts traffic to the new version gradually, rolling back by itself if alarms fire. The app runs privately in two AZs and can talk only to AWS services, through endpoints.
 
-Full diagram: [docs/architecture.md](docs/architecture.md). Costs: [docs/cost-analysis.md](docs/cost-analysis.md). Research: [docs/discovery-report.md](docs/discovery-report.md).
+Full diagram: [docs/architecture.md](docs/architecture.md). Costs: [docs/cost-analysis.md](docs/cost-analysis.md). Discovery report: [docs/discovery-report.pdf](docs/discovery-report.pdf).
 
 ---
 
@@ -133,10 +131,7 @@ AWS-onward-orders-app-infra/
 │   ├── 05-autoscaling.yaml             #   Target tracking on CPU and memory, optional night schedule
 │   └── 06-delivery.yaml                #   Alarms, CodeDeploy, CodePipeline, EventBridge rule
 ├── deployments/*.deployment.yaml       # GitSync file per stack: which template + parameters + tags
-├── rules/onward-standards.guard        # cfn-guard policy-as-code (no inline policies, no NAT, ...)
-├── .github/workflows/lint.yaml         # CI: cfn-lint + inline-policy grep + cfn-guard on every PR
-├── scripts/gitsync-setup.sh            # Creates each stack once, links it to GitSync, waits, in order
-├── scripts/teardown.sh                 # Deletes stacks 06 → 01 (idle = no cost)
+├── .github/workflows/lint.yaml         # CI: cfn-lint + inline-policy check + private-route check on every PR
 ├── cloudshell-deploy.sh                # One command that does everything from AWS CloudShell
 └── docs/                               # Architecture diagram, cost analysis, discovery report
 ```
@@ -185,9 +180,9 @@ GitSync (CodeConnections) sees the commit
 ```
 
 Three behaviours matter:
-1. **GitSync only updates; it never creates.** If the stack doesn't exist, it fails with *"Stack does not exist"*. That's why [scripts/gitsync-setup.sh](scripts/gitsync-setup.sh) creates each stack **once** with `aws cloudformation deploy`, using the same template, parameters and tags read from its deployment file. It then attaches the GitSync configuration, and from that point on Git drives every change.
+1. **GitSync only updates; it never creates.** If the stack doesn't exist, it fails with *"Stack does not exist"*. That's why [cloudshell-deploy.sh](cloudshell-deploy.sh) creates each missing stack **once** with `aws cloudformation deploy`, using the same template, parameters and tags read from its deployment file. It then attaches the GitSync configuration, and from that point on Git drives every change.
 2. **Trigger = `FILE_CHANGE`.** A stack syncs only when *its own* template or deployment file changes. Editing `05-autoscaling.yaml` touches only the 05 stack.
-3. **No cross-stack ordering.** GitSync syncs stacks independently, so the setup script creates them one at a time and waits for each to finish before starting the next.
+3. **No cross-stack ordering.** GitSync syncs stacks independently, so the deploy script creates them one at a time and waits for each to finish before starting the next.
 
 **Real example:** to raise peak capacity from 6 to 8 tasks, change one line in `deployments/05-autoscaling.deployment.yaml` (`MaxCapacity: "8"`), open a PR, and merge it. The CI lint runs on the PR. After the merge, GitSync updates only `onward-orders-lab-05-autoscaling` within a minute or two, and the console shows **MaxCapacity 8**. Nobody touches the console.
 
@@ -207,7 +202,7 @@ Every template takes `ResourcePrefix` (default `onward-orders-lab`). That parame
 |---|---|
 | `GitHubConnection` (optional) | The CodeConnections link to GitHub. It starts `PENDING` until someone clicks **Update pending connection** once in the console. That is the only console step in the whole lab. Skipped if `ExistingConnectionArn` is given. |
 | `GitSyncPolicy` | Lets GitSync create and execute change sets and manage its own EventBridge rules (scoped with `events:ManagedBy`). |
-| `StackDeployPolicy` | What CloudFormation needs to build stacks 01 to 06. IAM actions are limited to roles and policies named `onward-orders-lab-*`, S3 to buckets named `onward-orders-lab-*`, and the OIDC action to GitHub's provider ARN. |
+| `GitSyncDeployPolicy` | What CloudFormation needs to build stacks 01 to 06. IAM actions are limited to roles and policies named `onward-orders-lab-*`, S3 to buckets named `onward-orders-lab-*`, and the OIDC action to GitHub's provider ARN. |
 | `GitSyncRole` | Trusted by `cloudformation.sync.codeconnections.amazonaws.com` and `cloudformation.amazonaws.com`, only from this account (`aws:SourceAccount`). |
 
 **Outputs:** `GitSyncRoleArn` and `ConnectionArn`. The setup script reads both.
@@ -224,7 +219,7 @@ Every template takes `ResourcePrefix` (default `onward-orders-lab`). That parame
 |---|---|---|
 | `GitHubOidcProvider` | URL `token.actions.githubusercontent.com`, audience `sts.amazonaws.com` | Makes AWS trust tokens signed by GitHub. Only one is allowed per account, so `ExistingOidcProviderArn` can reuse an existing one. |
 | `EcrRepository` | `ScanOnPush: true`, AES256, `IMMUTABLE_WITH_EXCLUSION` (only `latest` may move), lifecycle rules: expire untagged images after 1 day, keep the last 20 | Every image is scanned for vulnerabilities. A SHA tag such as `0cbc300` can never be overwritten, so it always means the same code, which makes rollback trustworthy. |
-| `EcrPushPolicy` | `ecr:GetAuthorizationToken` + push actions **on this one repository only** | Least privilege: CI can push images and nothing else. It cannot delete images, read secrets or touch ECS. |
+| `GitHubActionsPushPolicy` | `ecr:GetAuthorizationToken` + push actions **on this one repository only** | Least privilege: CI can push images and nothing else. It cannot delete images, read secrets or touch ECS. |
 | `GitHubActionsRole` | Trust condition on `aud` and `sub`, max session 1 hour | Only the right repo on the right branch can assume it. |
 
 **The trust condition, which is the core of "no keys":**
@@ -324,7 +319,7 @@ A detail worth explaining: a new security group allows **all outbound traffic by
 | `Cluster` | Fargate only, Container Insights on | No EC2 to patch; CPU and memory metrics per task |
 | `LogGroup` | `/ecs/onward-orders-lab`, 14-day retention | Logs are kept long enough to debug but don't grow forever, which saves cost |
 | `TaskExecutionRole` | AWS-managed `AmazonECSTaskExecutionRolePolicy` | Used by the **ECS agent** to pull the image and write logs |
-| `TaskRole` + `TaskRolePolicy` | A managed policy that only **denies** `iam:*`, `sts:AssumeRole` and `organizations:*` | Used by **the app code**. The app needs no AWS APIs, so it gets none, and the explicit Deny blocks escalation even if someone attaches more later. |
+| `TaskRole` + `TaskPolicy` | A managed policy that only **denies** `iam:*`, `sts:AssumeRole` and `organizations:*` | Used by **the app code**. The app needs no AWS APIs, so it gets none, and the explicit Deny blocks escalation even if someone attaches more later. |
 | `TaskDefinition` | 0.25 vCPU / 512 MiB, image `<ecr-uri>:latest`, port 8080 | The **bootstrap** version, used only to create the service |
 | `Service` | `DeploymentController: CODE_DEPLOY`, `AssignPublicIp: DISABLED`, both private subnets, `task-sg`, blue target group, `DesiredCount: 2`, health check grace 60 s | Tasks spread over both AZs. CodeDeploy controls releases. |
 
@@ -349,8 +344,8 @@ A detail worth explaining: a new security group allows **all outbound traffic by
 | Resource | Settings |
 |---|---|
 | `ScalableTarget` | The service's `DesiredCount`, min **2**, max **6**. Optional schedule: 0 tasks at 19:00 and back to 2 at 07:00, Mon–Fri UTC. |
-| `CpuTargetTrackingPolicy` | Keep average CPU at **55%** |
-| `MemoryTargetTrackingPolicy` | Keep average memory at **75%** |
+| `CpuScalingPolicy` | Keep average CPU at **55%** |
+| `MemoryScalingPolicy` | Keep average memory at **75%** |
 | Cooldowns | Scale **out** after 60 s (react fast to peaks), scale **in** after 300 s (avoid flapping) |
 
 **How target tracking works, as an analogy:** it's a thermostat. You set the temperature (55% CPU), and AWS adds or removes tasks to keep it there. The two policies run together: AWS scales out if *either* metric is too high, and scales in only when *both* allow it.
@@ -368,12 +363,12 @@ A detail worth explaining: a new security group allows **all outbound traffic by
 | Resource | What it does |
 |---|---|
 | `ArtifactBucket` (+ policy) | Pipeline working files. Encrypted, versioned, all public access blocked, HTTPS required (`aws:SecureTransport`), expires after 30 days. |
-| `Target5xxAlarm` | Fires when the app returns ≥ 5 server errors in 1 minute |
-| `BlueUnhealthyHostsAlarm`, `GreenUnhealthyHostsAlarm` | Fire when ≥ 1 target is unhealthy for 2 consecutive minutes |
+| `ErrorAlarm` | Fires when the app returns ≥ 5 server errors in 1 minute |
+| `BlueUnhealthyAlarm`, `GreenUnhealthyAlarm` | Fire when ≥ 1 target is unhealthy for 2 consecutive minutes |
 | `CodeDeployApplication` + `DeploymentGroup` | `BLUE_GREEN` with traffic control; canary **10% for 5 min** then 100%; keeps blue **5 more min**; **auto rollback** on failure, alarm or manual stop; watches the 3 alarms |
 | `PipelinePolicy` + `PipelineRole` | Least privilege: this artifact bucket, `DescribeImages` on this repo, this GitHub connection, this CodeDeploy app, register **and tag** task definitions of this family only, and `PassRole` of the two task roles to ECS only |
 | `Pipeline` (V2, `QUEUED`) | **Source**: `Image` (ECR, tag `latest`) and `DeploySpecs` (GitHub app repo: `taskdef.json` + `appspec.yaml`, `DetectChanges: false`). **Deploy**: `CodeDeployToECS`. |
-| `EcrPushRule` + `EventsInvokePipelineRole` | EventBridge: on *ECR Image Action PUSH SUCCESS* for repo `onward-orders-lab`, tag `latest`, start the pipeline. The role can do **only** `StartPipelineExecution` on this pipeline. |
+| `ImagePushRule` + `EventBridgeRole` | EventBridge: on *ECR Image Action PUSH SUCCESS* for repo `onward-orders-lab`, tag `latest`, start the pipeline. The role can do **only** `StartPipelineExecution` on this pipeline. |
 
 **Why the pipeline reads two sources:** the image says *what* code to run; `taskdef.json` and `appspec.yaml` from the app repo say *how* to run it (CPU, health check, port). The pipeline replaces `<IMAGE1_NAME>` in `taskdef.json` with the exact image URI and registers a new revision. CodeDeploy then deploys it according to `appspec.yaml`.
 
@@ -488,18 +483,9 @@ To give tasks more memory: edit `TaskMemory: "1024"` in `deployments/04-ecs.depl
 - **CI on every PR** ([.github/workflows/lint.yaml](.github/workflows/lint.yaml)):
   1. `cfn-lint` validates every template against the CloudFormation spec.
   2. `grep` fails the build if `Policies:` or `AWS::IAM::Policy` appears anywhere.
-  3. `cfn-guard` runs [rules/onward-standards.guard](rules/onward-standards.guard):
+  3. A Python check fails the build if any `AWS::EC2::Route` is added to a private route table.
 
-| Rule | Enforces |
-|---|---|
-| `no_inline_policy_resources`, `roles_have_no_inline_policies` | Managed policies only |
-| `no_nat_gateway` | No internet path for the app |
-| `tasks_private` | `AssignPublicIp: DISABLED` and `CODE_DEPLOY` controller |
-| `subnets_no_auto_public_ip` | No subnet hands out public IPs |
-| `buckets_encrypted_and_private` | Encryption + public access block |
-| `ecr_scan_on_push` | Images are scanned |
-
-So a PR that adds a NAT gateway or an inline policy **fails before it can reach `main`**, and GitSync never sees it.
+So a PR that adds an inline policy or gives the private subnets a route to the internet (through an internet gateway or a NAT gateway) **fails before it can reach `main`**, and GitSync never sees it. After deployment, `bash cloudshell-deploy.sh verify` checks the live account for the same things: no NAT gateway, no `0.0.0.0/0` in private route tables, no inline policies.
 
 ---
 
@@ -515,9 +501,9 @@ The repos are public, so no token is needed. If you `export GITHUB_TOKEN=<PAT: r
 What the script does, in order:
 1. Deploys `00-bootstrap` and waits for the one-time GitHub connection authorization.
 2. Checks that account-specific values (account ID, region, connection ARN, S3 prefix list) are correct in both repos.
-3. Runs GitSync setup for **01 → 03**.
+3. For **01 → 03**: creates each missing stack once, attaches GitSync, waits for it.
 4. Waits for GitHub Actions to push the first image (click **Run workflow** on build-and-push if asked).
-5. Runs GitSync setup for **04 → 06**.
+5. Same as step 3 for **04 → 06**.
 6. Verifies: ALB returns 200 on `/health`, no NAT, no default route in private subnets, no inline policies, OIDC role present, service stable.
 
 Every step is **idempotent**. If CloudShell times out, run the same command again and it continues where it stopped.
@@ -527,7 +513,7 @@ Every step is **idempotent**. If CloudShell times out, run the same command agai
 | `bash cloudshell-deploy.sh status` | Stack status, ALB URL, last pipeline run |
 | `bash cloudshell-deploy.sh publish` | Re-apply account values to both repos |
 | `bash cloudshell-deploy.sh verify` | Re-run the security and HA checks |
-| `bash cloudshell-deploy.sh teardown` | Delete stacks 06 → 01 (idle = no cost) |
+| `bash cloudshell-deploy.sh teardown` | Delete stacks 06 → 01 (idle = no cost); `deploy` rebuilds them |
 
 Settings such as `AWS_REGION`, `PREFIX`, `INFRA_REPO`, `APP_REPO` and `CONNECTION_ARN` are at the top of [cloudshell-deploy.sh](cloudshell-deploy.sh).
 
@@ -547,9 +533,9 @@ Region `eu-west-1`, account `648637468459`, from the repo root with admin creden
      --tags Project=onward-orders Environment=lab Owner=patrick-ndaziramiye CostCenter=amalitech-training ManagedBy=cloudformation Repository=AWS-onward-orders-app-infra
    ```
    With `ExistingConnectionArn` empty, a new connection is created in `PENDING`. Open **Developer Tools → Settings → Connections → Update pending connection**.
-2. **Foundation, network, ALB:** `./scripts/gitsync-setup.sh 01-foundation 02-network 03-alb`
+2. **Foundation, network, ALB:** for each of `01-foundation`, `02-network`, `03-alb`, in order: create the stack once with `aws cloudformation deploy` using the template, parameters and tags in its `deployments/<name>.deployment.yaml`, then attach GitSync with `aws codeconnections create-sync-configuration --sync-type CFN_STACK_SYNC --config-file deployments/<name>.deployment.yaml ...`, and wait for `CREATE_COMPLETE`.
 3. **First image:** push to `main` in the app repo, or run its workflow manually.
-4. **ECS, autoscaling, delivery:** `./scripts/gitsync-setup.sh 04-ecs 05-autoscaling 06-delivery`
+4. **ECS, autoscaling, delivery:** same as step 2 for `04-ecs`, `05-autoscaling`, `06-delivery`.
 5. Open the `LoadBalancerDnsName` output of the `03-alb` stack.
 
 The first image push happens before stack 06 exists, so it doesn't trigger a pipeline. The service runs that image from the bootstrap task definition. To prove the pipeline end to end immediately: `aws codepipeline start-pipeline-execution --name onward-orders-lab-pipeline`.
@@ -558,11 +544,11 @@ The first image push happens before stack 06 exists, so it doesn't trigger a pip
 
 ## 11. Release, rollback, and idle
 
-- **Release:** merge to `main` in the app repo. Nothing else.
+- **Release:** merge to `main` in the app repo. Nothing else. The app workflow's `release` job runs `scripts/wait-for-release.sh`, so the GitHub check stays yellow during the canary and the rollback window and turns green only when the pipeline run for that image succeeds (red if CodeDeploy rolls back). During the canary about 10% of users already see the new version; that is the canary working, not a leak.
 - **Automatic rollback:** if the 5XX alarm or either unhealthy-host alarm fires, or the deployment fails, CodeDeploy returns traffic to the old tasks.
 - **Manual rollback during a release:** `aws deploy stop-deployment --deployment-id <id> --auto-rollback-enabled`, or **Stop and roll back** in the CodeDeploy console.
 - **Roll back after a release finished:** re-tag an older SHA as `latest` ([Example E](#example-e-rolling-back-to-last-weeks-version)).
-- **Idle:** `bash cloudshell-deploy.sh teardown` (or `./scripts/teardown.sh`) removes everything billable. For nights only, set `EnableOfficeHoursSchedule: "true"` in `deployments/05-autoscaling.deployment.yaml`. That saves Fargate only; the ALB and endpoints still bill.
+- **Idle:** `bash cloudshell-deploy.sh teardown` removes everything billable (GitSync configurations first, then the artifact bucket, then stacks 06 → 01). `bash cloudshell-deploy.sh deploy` rebuilds it. For nights only, set `EnableOfficeHoursSchedule: "true"` in `deployments/05-autoscaling.deployment.yaml`. That saves Fargate only; the ALB and endpoints still bill.
 
 ---
 
@@ -584,72 +570,10 @@ eu-west-1, always on, 2 tasks, approximate list prices (details: [docs/cost-anal
 
 ---
 
-## 13. Problems we hit and how they were fixed
-
-These are real issues from building this lab. They make good live-review material because they show how the pieces actually behave.
-
-| Symptom | Root cause | Fix |
-|---|---|---|
-| GitSync: *"Stack does not exist"* | GitSync only **updates** stacks; it cannot create them | `gitsync-setup.sh` creates each stack once from its deployment file, then attaches GitSync |
-| GitHub Actions: *"Not authorized to perform sts:AssumeRoleWithWebIdentity"* | Newer repos send the OIDC `sub` in the immutable format `repo:owner@<id>/repo@<id>:...`, which didn't match the `StringEquals` condition | Trust condition changed to `StringLike` accepting both formats, still locked to this repo and `main` |
-| Build fails: *tag `234a874` already exists* | Re-running the same commit tries to overwrite an **immutable** SHA tag | Expected and correct: immutability is working. Push a new commit instead. |
-| Pipeline Deploy fails: not authorized for `ecs:TagResource` | `taskdef.json` has tags, so registering it also tags it | Added `ecs:TagResource`, limited to this task-definition family and only during `RegisterTaskDefinition` |
-| ECS console *Health status: Unknown* | The task definition had no container `healthCheck` (the ALB checks are separate) | Added a `healthCheck` on `/health` to `taskdef.json` in the app repo, released through the pipeline |
-
----
-
-## 14. Things a new engineer must know
+## 13. Things a new engineer must know
 
 1. **CodeDeploy owns the service after creation.** Don't change `TaskDefinition` or `LoadBalancers` in `04-ecs.yaml`, or the listener default actions in `03-alb.yaml`. After a release, production may point at *green*, and a stack update would fight CodeDeploy. App and runtime changes ship through the app repo (`taskdef.json`).
 2. **Stack order matters.** Create 01 → 06, delete 06 → 01. Exports block wrong-order deletes.
 3. **Tasks stuck in PROVISIONING, or `CannotPullContainerError`,** almost always mean a missing endpoint (`ecr.api`, `ecr.dkr`, `logs`, S3 gateway) or `endpoint-sg` not allowing 443 from `task-sg`.
 4. **ECR tags:** SHA tags are immutable. Only `latest` can move, because `latest` is what the pipeline watches.
-5. **Run scripts from the repo folder** (`cd ~/AWS-onward-orders-app-infra`), because they use relative paths like `deployments/`.
-
----
-
-## 15. Presenting this project
-
-### A 5-minute talk track
-
-1. **The problem (45 s).** "Onward Logistics releases cause downtime, are manual, rely on long-lived keys, and are slow to roll back. Each stakeholder had a clear demand." Show the table in [section 1](#1-the-problem-we-are-solving).
-2. **The idea (45 s).** "A merge is the only manual step. Everything else is automatic, gradual, and self-healing." Show the picture in [section 2](#2-the-solution-in-one-picture).
-3. **The templates (2 min).** Walk 01 → 06 in one line each:
-   - **01** – *who* may push (OIDC, no keys) and *where* images live (ECR, immutable)
-   - **02** – a private network with **no internet path**, chained SGs, endpoints instead of NAT
-   - **03** – the **only public door**, with two slots: blue and green
-   - **04** – Fargate tasks in 2 AZs, with **CodeDeploy as the controller**
-   - **05** – the thermostat: 2 to 6 tasks
-   - **06** – EventBridge → Pipeline → canary 10% → auto rollback
-4. **Live demo (1 min).** Push a change and watch it flow; or show a rollback.
-5. **Close (30 s).** "Every stakeholder requirement maps to a resource in a template, and CI blocks any PR that breaks a security rule. The whole environment rebuilds from these two repos, and `teardown` makes idle cost zero."
-
-### Questions you will probably get
-
-| Question | Answer |
-|---|---|
-| Why not a NAT gateway? It's simpler. | It gives the app an internet path, which Security forbids. Endpoints give access only to the AWS services we name. |
-| How does GitHub get AWS access without a secret? | OIDC: GitHub signs a token saying "repo X, branch main". IAM checks the signature and the `sub` condition, then STS gives 1-hour credentials. |
-| What stops another repo or branch from deploying? | The trust policy's `sub` condition. Anything other than this repo on `main` is denied. |
-| What if a bad version is released? | Canary: only 10% of traffic sees it, for 5 minutes. Alarms trigger auto rollback, which is a traffic switch back to blue taking seconds. |
-| Why blue/green over rolling? | Instant rollback, a test listener before go-live, and no mixing of versions during the switch. |
-| Why two repos? | Different lifecycles and permissions: app developers ship code; infra changes are reviewed separately. Neither can break the other by accident. |
-| Why does GitSync need a bootstrap stack? | GitSync needs a role to deploy with, and it can't create its own role. |
-| How do you prove there are no inline policies? | `grep` + `cfn-guard` in CI on every PR, and the `verify` command checks the live account. |
-| What happens if an AZ fails? | Min 2 tasks, one per AZ, and the ALB spans both AZs. The surviving AZ keeps serving while ECS replaces capacity. |
-| What does it cost? | ~$94/month always on, ~$0 after teardown. The endpoints (~$48) are the price of having no internet path. |
-| Why is `latest` mutable when everything else is immutable? | `latest` is the "release pointer" the pipeline watches. The real identity of each version is its immutable SHA tag. |
-
-### Live demo checklist
-
-| Check | How |
-|---|---|
-| One public address, private tasks | Open the ALB DNS. ECS task → Networking shows no public IP. VPC → route tables `private-rt-a/b` have only `local` and the S3 prefix list. |
-| Push → live, no human | Edit `RELEASE_NOTE` in `app/settings.py` and push. Watch Actions → ECR → CodePipeline → CodeDeploy. |
-| Zero downtime | `while true; do curl -s http://<alb>/version; echo; sleep 1; done` during a release. Every line succeeds, and the version flips. |
-| Bad release rolls back | Set `FORCE_UNHEALTHY = True` and push. Green fails `/health`, the alarm fires, and CodeDeploy rolls back. Set it back to `False` afterwards. |
-| No long-lived credentials | GitHub → Settings → Secrets has no AWS secrets. IAM → Users has no keys. Show the OIDC trust on `onward-orders-lab-github-actions-role`. |
-| Scale out and in | `hey -z 3m -c 40 "http://<alb>/cpu?seconds=1"`, then watch desired count rise, and fall after the 300 s cooldown. |
-| Task failure | `aws ecs stop-task --cluster onward-orders-lab-cluster --task <id>`. The ALB keeps serving and ECS replaces the task. |
-| AZ spread | The home page shows the AZ. Refresh to see both `eu-west-1a` and `eu-west-1b`. |
-| Health | ECS → tasks show **Health status: Healthy**. `curl http://<alb>/health` returns `ok`. |
+5. **Run `cloudshell-deploy.sh` from a clone of this repo**, because it reads `templates/`, `bootstrap/` and `deployments/` next to it.

@@ -40,7 +40,7 @@ At peak, the service scales to 6 tasks. That adds about $9 per extra task-month,
 
 | Option | How | What still bills |
 |---|---|---|
-| **Teardown** (chosen for nights and weekends of the lab) | `scripts/teardown.sh` deletes stacks 06 to 01. Rebuild with `scripts/gitsync-setup.sh`. | Nothing except ECR images (deleted too, since `EmptyOnDelete`) and the bootstrap IAM role, which is free |
+| **Teardown** (chosen for nights and weekends of the lab) | `bash cloudshell-deploy.sh teardown` deletes stacks 06 to 01. `bash cloudshell-deploy.sh deploy` rebuilds them from the repos. | Nothing except ECR images (deleted too, since `EmptyOnDelete`) and the bootstrap IAM role, which is free |
 | Scale to zero | `MinCapacity: "0"`, `MaxCapacity: "0"`, or `EnableOfficeHoursSchedule: "true"` | ALB + endpoints, ~$72/month. This saves Fargate only. |
 
 ## Sizing justification

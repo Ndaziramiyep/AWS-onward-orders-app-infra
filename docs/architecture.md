@@ -5,10 +5,9 @@
 Files:
 
 - [architecture.drawio](architecture.drawio): the editable source. Open it in draw.io (app.diagrams.net or the desktop app).
-- [architecture.svg](architecture.svg): the vector version, sharp at any size.
 - [architecture.png](architecture.png): the picture shown above.
 
-To rebuild all three, run `python docs/report-src/build_architecture_drawio.py`. It needs internet access, because the export uses draw.io's own viewer.
+To change the diagram, edit `architecture.drawio` in draw.io and export it again as `architecture.png`.
 
 ## Numbered flow of a change
 
