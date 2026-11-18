@@ -1,13 +1,14 @@
-# GitSync deployment file for stack onward-orders-lab-03-alb
-template-file-path: templates/03-alb.yaml          # Template this stack deploys
-parameters:                             # Parameter values for the stack
-  ResourcePrefix: onward-orders-lab     # Naming prefix
-  CertificateArn: ""                    # No domain in the lab, so HTTP on port 80
-tags:                                   # Company-standard tags, applied by GitSync to the stack and propagated to every taggable resource
-  Project: onward-orders                # Product / workload name
-  Environment: lab                      # Environment (lab, dev, prod)
-  Owner: patrick-ndaziramiye            # Accountable engineer
-  CostCenter: amalitech-training        # Billing owner
-  ManagedBy: cloudformation-gitsync     # How the resource is managed
-  Repository: AWS-onward-orders-app-infra       # Source repository
-# GitSync initial sync 2026-11-17
+# Template for stack onward-orders-lab-03-alb: Internet-facing ALB with blue/green target groups and listeners.
+template-file-path: templates/03-alb.yaml
+# Stack parameter values.
+parameters:
+  ResourcePrefix: onward-orders-lab
+  CertificateArn: ""
+# Company-standard tags, propagated by GitSync to every taggable resource.
+tags:
+  Project: onward-orders
+  Environment: lab
+  Owner: patrick-ndaziramiye
+  CostCenter: amalitech-training
+  ManagedBy: cloudformation-gitsync
+  Repository: AWS-onward-orders-app-infra

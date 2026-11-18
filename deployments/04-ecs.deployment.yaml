@@ -1,17 +1,17 @@
-# GitSync deployment file for stack onward-orders-lab-04-ecs
-# Create ONLY after the first image is in ECR (app repo workflow has run once).
-template-file-path: templates/04-ecs.yaml          # Template this stack deploys
-parameters:                             # Parameter values for the stack
-  ResourcePrefix: onward-orders-lab     # Naming prefix
-  TaskCpu: "256"                        # 0.25 vCPU per task
-  TaskMemory: "512"                     # 512 MiB per task
-  DesiredCount: "2"                     # One task per AZ
-  BootstrapImageTag: latest             # First image pushed by GitHub Actions
-tags:                                   # Company-standard tags, applied by GitSync to the stack and propagated to every taggable resource
-  Project: onward-orders                # Product / workload name
-  Environment: lab                      # Environment (lab, dev, prod)
-  Owner: patrick-ndaziramiye            # Accountable engineer
-  CostCenter: amalitech-training        # Billing owner
-  ManagedBy: cloudformation-gitsync     # How the resource is managed
-  Repository: AWS-onward-orders-app-infra       # Source repository
-# GitSync initial sync 2026-11-17
+# Template for stack onward-orders-lab-04-ecs: Fargate cluster, roles and service. Create only after the first image is in ECR.
+template-file-path: templates/04-ecs.yaml
+# Stack parameter values.
+parameters:
+  ResourcePrefix: onward-orders-lab
+  TaskCpu: "256"
+  TaskMemory: "512"
+  DesiredCount: "2"
+  BootstrapImageTag: latest
+# Company-standard tags, propagated by GitSync to every taggable resource.
+tags:
+  Project: onward-orders
+  Environment: lab
+  Owner: patrick-ndaziramiye
+  CostCenter: amalitech-training
+  ManagedBy: cloudformation-gitsync
+  Repository: AWS-onward-orders-app-infra

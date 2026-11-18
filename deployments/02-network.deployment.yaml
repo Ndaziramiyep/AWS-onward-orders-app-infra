@@ -1,15 +1,16 @@
-# GitSync deployment file for stack onward-orders-lab-02-network
-template-file-path: templates/02-network.yaml      # Template this stack deploys
-parameters:                             # Parameter values for the stack
-  ResourcePrefix: onward-orders-lab     # Naming prefix
-  VpcCidr: 10.20.0.0/16                 # VPC range
-  S3PrefixListId: pl-6da54004           # S3 prefix list for eu-west-1
-  TestListenerIngressCidr: 10.20.0.0/16 # Green preview reachable from inside the VPC only
-tags:                                   # Company-standard tags, applied by GitSync to the stack and propagated to every taggable resource
-  Project: onward-orders                # Product / workload name
-  Environment: lab                      # Environment (lab, dev, prod)
-  Owner: patrick-ndaziramiye            # Accountable engineer
-  CostCenter: amalitech-training        # Billing owner
-  ManagedBy: cloudformation-gitsync     # How the resource is managed
-  Repository: AWS-onward-orders-app-infra       # Source repository
-# GitSync initial sync 2026-11-17
+# Template for stack onward-orders-lab-02-network: VPC, subnets, security groups and VPC endpoints.
+template-file-path: templates/02-network.yaml
+# Stack parameter values.
+parameters:
+  ResourcePrefix: onward-orders-lab
+  VpcCidr: 10.20.0.0/16
+  S3PrefixListId: pl-6da54004
+  TestListenerIngressCidr: 10.20.0.0/16
+# Company-standard tags, propagated by GitSync to every taggable resource.
+tags:
+  Project: onward-orders
+  Environment: lab
+  Owner: patrick-ndaziramiye
+  CostCenter: amalitech-training
+  ManagedBy: cloudformation-gitsync
+  Repository: AWS-onward-orders-app-infra

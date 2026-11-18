@@ -1,325 +1,352 @@
-AWSTemplateFormatVersion: "2010-09-09"                     # CloudFormation template format version
-Description: >-                                             # Shown in the CloudFormation console
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
   Onward Logistics - 02 network. VPC across two AZs: public subnets for the ALB only, private
   subnets for tasks and endpoints with NO default route and NO NAT gateway. AWS services are
   reached through VPC endpoints. Security groups are chained (ALB -> tasks -> endpoints).
 
-Parameters:                                                 # Inputs
-  ResourcePrefix:                                           # Company naming prefix
-    Type: String                                            # Text
-    Default: onward-orders-lab                              # <project>-<environment>
-    AllowedPattern: "^[a-z][a-z0-9-]{2,24}$"                # Lowercase, short, DNS-safe
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: onward-orders-lab
+    AllowedPattern: "^[a-z][a-z0-9-]{2,24}$"
     Description: Naming prefix <project>-<environment> applied to every resource.
-  VpcCidr:                                                  # Whole VPC range
-    Type: String                                            # Text
-    Default: 10.20.0.0/16                                   # 65k addresses
-  PublicSubnetACidr:                                        # Public subnet, AZ a
-    Type: String                                            # Text
-    Default: 10.20.0.0/24                                   # 256 addresses
-  PublicSubnetBCidr:                                        # Public subnet, AZ b
-    Type: String                                            # Text
-    Default: 10.20.1.0/24                                   # 256 addresses
-  PrivateSubnetACidr:                                       # Private subnet, AZ a
-    Type: String                                            # Text
-    Default: 10.20.10.0/24                                  # 256 addresses
-  PrivateSubnetBCidr:                                       # Private subnet, AZ b
-    Type: String                                            # Text
-    Default: 10.20.11.0/24                                  # 256 addresses
-  S3PrefixListId:                                           # AWS-managed list of S3 IP ranges
-    Type: String                                            # Text
-    Default: pl-6da54004                                    # eu-west-1 S3 prefix list
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/16
+  PublicSubnetACidr:
+    Type: String
+    Default: 10.20.0.0/24
+  PublicSubnetBCidr:
+    Type: String
+    Default: 10.20.1.0/24
+  PrivateSubnetACidr:
+    Type: String
+    Default: 10.20.10.0/24
+  PrivateSubnetBCidr:
+    Type: String
+    Default: 10.20.11.0/24
+  S3PrefixListId:
+    Type: String
+    Default: pl-6da54004
     Description: >-
       AWS-managed prefix list for S3 in this region (eu-west-1 = pl-6da54004). Find it with
       aws ec2 describe-managed-prefix-lists --filters Name=prefix-list-name,Values=com.amazonaws.<region>.s3
-  TestListenerIngressCidr:                                  # Who can preview the green version
-    Type: String                                            # Text
-    Default: 10.20.0.0/16                                   # VPC only by default
+  TestListenerIngressCidr:
+    Type: String
+    Default: 10.20.0.0/16
     Description: >-
       Who may reach the CodeDeploy test listener (:8080) to preview the green version.
       Defaults to inside the VPC only. Set to <your-ip>/32 temporarily to preview green yourself.
-  AppPort:                                                  # Container port
-    Type: Number                                            # Integer
-    Default: 8080                                           # App listens here
+  AppPort:
+    Type: Number
+    Default: 8080
 
-Resources:                                                  # Everything this stack creates
-  Vpc:                                                      # The private network
-    Type: AWS::EC2::VPC                                     # VPC resource
-    Properties:                                             # VPC settings
-      CidrBlock: !Ref VpcCidr                               # IP range
-      EnableDnsSupport: true                                # Needed for endpoint private DNS
-      EnableDnsHostnames: true                              # Needed for endpoint private DNS
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-vpc" }  # Name tag
+Resources:
+  # VPC spanning two availability zones.
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-vpc" }
 
-  InternetGateway:                                          # Internet door, used by public subnets only
-    Type: AWS::EC2::InternetGateway                         # IGW resource
-    Properties:                                             # IGW settings
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-igw" }  # Name tag
+  # Internet gateway, used by the public subnets only.
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-igw" }
 
-  InternetGatewayAttachment:                                # Attach IGW to VPC
-    Type: AWS::EC2::VPCGatewayAttachment                    # Attachment resource
-    Properties:                                             # Attachment settings
-      VpcId: !Ref Vpc                                       # This VPC
-      InternetGatewayId: !Ref InternetGateway               # This IGW
+  # Attaches the internet gateway to the VPC.
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
 
-  PublicSubnetA:                                            # ALB subnet in AZ a
-    Type: AWS::EC2::Subnet                                  # Subnet resource
-    Properties:                                             # Subnet settings
-      VpcId: !Ref Vpc                                       # Parent VPC
-      CidrBlock: !Ref PublicSubnetACidr                     # IP range
-      AvailabilityZone: !Select [0, !GetAZs ""]             # First AZ in the region
-      MapPublicIpOnLaunch: false                            # Nothing gets a public IP automatically
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-public-a" }  # Name tag
-        - { Key: Tier, Value: public }                      # Tier tag
+  # Public subnet in AZ a, for the ALB only.
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnetACidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-public-a" }
+        - { Key: Tier, Value: public }
 
-  PublicSubnetB:                                            # ALB subnet in AZ b
-    Type: AWS::EC2::Subnet                                  # Subnet resource
-    Properties:                                             # Subnet settings
-      VpcId: !Ref Vpc                                       # Parent VPC
-      CidrBlock: !Ref PublicSubnetBCidr                     # IP range
-      AvailabilityZone: !Select [1, !GetAZs ""]             # Second AZ
-      MapPublicIpOnLaunch: false                            # No automatic public IPs
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-public-b" }  # Name tag
-        - { Key: Tier, Value: public }                      # Tier tag
+  # Public subnet in AZ b, for the ALB only.
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnetBCidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-public-b" }
+        - { Key: Tier, Value: public }
 
-  PrivateSubnetA:                                           # Task + endpoint subnet in AZ a
-    Type: AWS::EC2::Subnet                                  # Subnet resource
-    Properties:                                             # Subnet settings
-      VpcId: !Ref Vpc                                       # Parent VPC
-      CidrBlock: !Ref PrivateSubnetACidr                    # IP range
-      AvailabilityZone: !Select [0, !GetAZs ""]             # First AZ
-      MapPublicIpOnLaunch: false                            # Never public
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-private-a" }  # Name tag
-        - { Key: Tier, Value: private }                     # Tier tag
+  # Private subnet in AZ a, for tasks and interface endpoints.
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnetACidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-private-a" }
+        - { Key: Tier, Value: private }
 
-  PrivateSubnetB:                                           # Task + endpoint subnet in AZ b
-    Type: AWS::EC2::Subnet                                  # Subnet resource
-    Properties:                                             # Subnet settings
-      VpcId: !Ref Vpc                                       # Parent VPC
-      CidrBlock: !Ref PrivateSubnetBCidr                    # IP range
-      AvailabilityZone: !Select [1, !GetAZs ""]             # Second AZ
-      MapPublicIpOnLaunch: false                            # Never public
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-private-b" }  # Name tag
-        - { Key: Tier, Value: private }                     # Tier tag
+  # Private subnet in AZ b, for tasks and interface endpoints.
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnetBCidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-private-b" }
+        - { Key: Tier, Value: private }
 
-  PublicRouteTable:                                         # Routes for public subnets
-    Type: AWS::EC2::RouteTable                              # Route table resource
-    Properties:                                             # Settings
-      VpcId: !Ref Vpc                                       # Parent VPC
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-public-rt" }  # Name tag
+  # Route table shared by the public subnets.
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-public-rt" }
 
-  PublicDefaultRoute:                                       # Internet route (public side only)
-    Type: AWS::EC2::Route                                   # Route resource
-    DependsOn: InternetGatewayAttachment                    # IGW must be attached first
-    Properties:                                             # Route settings
-      RouteTableId: !Ref PublicRouteTable                   # Public table only
-      DestinationCidrBlock: 0.0.0.0/0                       # All internet traffic
-      GatewayId: !Ref InternetGateway                       # Via the IGW
+  # Internet route for the public subnets.
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
 
-  PublicSubnetARouteTableAssociation:                       # Link public subnet A to public table
-    Type: AWS::EC2::SubnetRouteTableAssociation             # Association resource
-    Properties:                                             # Settings
-      SubnetId: !Ref PublicSubnetA                          # Subnet
-      RouteTableId: !Ref PublicRouteTable                   # Table
+  # Associates public subnet A with the public route table.
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
 
-  PublicSubnetBRouteTableAssociation:                       # Link public subnet B to public table
-    Type: AWS::EC2::SubnetRouteTableAssociation             # Association resource
-    Properties:                                             # Settings
-      SubnetId: !Ref PublicSubnetB                          # Subnet
-      RouteTableId: !Ref PublicRouteTable                   # Table
+  # Associates public subnet B with the public route table.
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
 
-  PrivateRouteTableA:                                       # Private table AZ a: local + S3 only, no 0.0.0.0/0
-    Type: AWS::EC2::RouteTable                              # Route table resource
-    Properties:                                             # Settings
-      VpcId: !Ref Vpc                                       # Parent VPC
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-private-rt-a" }  # Name tag
+  # Private route table for AZ a: no default route, AWS is reached through VPC endpoints.
+  PrivateRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-private-rt-a" }
 
-  PrivateRouteTableB:                                       # Private table AZ b: local + S3 only, no 0.0.0.0/0
-    Type: AWS::EC2::RouteTable                              # Route table resource
-    Properties:                                             # Settings
-      VpcId: !Ref Vpc                                       # Parent VPC
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-private-rt-b" }  # Name tag
+  # Private route table for AZ b: no default route, AWS is reached through VPC endpoints.
+  PrivateRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-private-rt-b" }
 
-  PrivateSubnetARouteTableAssociation:                      # Link private subnet A to its table
-    Type: AWS::EC2::SubnetRouteTableAssociation             # Association resource
-    Properties:                                             # Settings
-      SubnetId: !Ref PrivateSubnetA                         # Subnet
-      RouteTableId: !Ref PrivateRouteTableA                 # Table
+  # Associates private subnet A with its route table.
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTableA
 
-  PrivateSubnetBRouteTableAssociation:                      # Link private subnet B to its table
-    Type: AWS::EC2::SubnetRouteTableAssociation             # Association resource
-    Properties:                                             # Settings
-      SubnetId: !Ref PrivateSubnetB                         # Subnet
-      RouteTableId: !Ref PrivateRouteTableB                 # Table
+  # Associates private subnet B with its route table.
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTableB
 
-  AlbSecurityGroup:                                         # Firewall for the ALB
-    Type: AWS::EC2::SecurityGroup                           # Security group resource
-    Properties:                                             # SG settings
-      GroupName: !Sub ${ResourcePrefix}-alb-sg              # SG name
+  # ALB security group. The 127.0.0.1/32 egress rule replaces the default allow-all.
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ResourcePrefix}-alb-sg
       GroupDescription: Internet-facing ALB. HTTP/HTTPS from anywhere, test listener restricted.
-      VpcId: !Ref Vpc                                       # Parent VPC
-      SecurityGroupIngress:                                 # Inbound rules
-        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: Production HTTP }          # Public HTTP
-        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: Production HTTPS }       # Public HTTPS
-        - { IpProtocol: tcp, FromPort: 8080, ToPort: 8080, CidrIp: !Ref TestListenerIngressCidr, Description: CodeDeploy test listener }  # Restricted preview
-      SecurityGroupEgress:                                  # Outbound rules
-        - { IpProtocol: "-1", CidrIp: 127.0.0.1/32, Description: Removes default allow-all egress }  # Placeholder that blocks everything
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-alb-sg" }  # Name tag
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: Production HTTP }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: Production HTTPS }
+        - { IpProtocol: tcp, FromPort: 8080, ToPort: 8080, CidrIp: !Ref TestListenerIngressCidr, Description: CodeDeploy test listener }
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 127.0.0.1/32, Description: Removes default allow-all egress }
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-alb-sg" }
 
-  TaskSecurityGroup:                                        # Firewall for the Fargate tasks
-    Type: AWS::EC2::SecurityGroup                           # Security group resource
-    Properties:                                             # SG settings
-      GroupName: !Sub ${ResourcePrefix}-task-sg             # SG name
+  # Fargate task security group, reachable only from the ALB.
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ResourcePrefix}-task-sg
       GroupDescription: ECS Fargate tasks. Reachable only from the ALB.
-      VpcId: !Ref Vpc                                       # Parent VPC
-      SecurityGroupEgress:                                  # Outbound rules
-        - { IpProtocol: "-1", CidrIp: 127.0.0.1/32, Description: Removes default allow-all egress }  # Placeholder that blocks everything
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-task-sg" }  # Name tag
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 127.0.0.1/32, Description: Removes default allow-all egress }
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-task-sg" }
 
-  EndpointSecurityGroup:                                    # Firewall for interface endpoints
-    Type: AWS::EC2::SecurityGroup                           # Security group resource
-    Properties:                                             # SG settings
-      GroupName: !Sub ${ResourcePrefix}-endpoint-sg         # SG name
+  # Interface endpoint security group, HTTPS from tasks only.
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ResourcePrefix}-endpoint-sg
       GroupDescription: Interface VPC endpoints. HTTPS only from the tasks.
-      VpcId: !Ref Vpc                                       # Parent VPC
-      SecurityGroupEgress:                                  # Outbound rules
-        - { IpProtocol: "-1", CidrIp: 127.0.0.1/32, Description: Removes default allow-all egress }  # Endpoints never start connections
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-endpoint-sg" }  # Name tag
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - { IpProtocol: "-1", CidrIp: 127.0.0.1/32, Description: Removes default allow-all egress }
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-endpoint-sg" }
 
-  AlbToTaskEgress:                                          # ALB may talk to tasks
-    Type: AWS::EC2::SecurityGroupEgress                     # Separate rule avoids circular refs
-    Properties:                                             # Rule settings
-      GroupId: !Ref AlbSecurityGroup                        # From the ALB
-      IpProtocol: tcp                                       # TCP
-      FromPort: !Ref AppPort                                # App port
-      ToPort: !Ref AppPort                                  # App port
-      DestinationSecurityGroupId: !Ref TaskSecurityGroup    # To tasks only
+  # ALB to tasks on the app port. Cross-group rules are separate to avoid circular references.
+  AlbToTaskEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AlbSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref AppPort
+      ToPort: !Ref AppPort
+      DestinationSecurityGroupId: !Ref TaskSecurityGroup
       Description: ALB to tasks (traffic and health checks)
 
-  TaskFromAlbIngress:                                       # Tasks accept traffic from the ALB only
-    Type: AWS::EC2::SecurityGroupIngress                    # Separate rule avoids circular refs
-    Properties:                                             # Rule settings
-      GroupId: !Ref TaskSecurityGroup                       # Into the tasks
-      IpProtocol: tcp                                       # TCP
-      FromPort: !Ref AppPort                                # App port
-      ToPort: !Ref AppPort                                  # App port
-      SourceSecurityGroupId: !Ref AlbSecurityGroup          # Only from the ALB
+  # Tasks accept the app port from the ALB only.
+  TaskFromAlbIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref AppPort
+      ToPort: !Ref AppPort
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
       Description: App port only from the ALB
 
-  TaskToEndpointEgress:                                     # Tasks may reach the endpoints
-    Type: AWS::EC2::SecurityGroupEgress                     # Outbound rule
-    Properties:                                             # Rule settings
-      GroupId: !Ref TaskSecurityGroup                       # From tasks
-      IpProtocol: tcp                                       # TCP
-      FromPort: 443                                         # HTTPS
-      ToPort: 443                                           # HTTPS
-      DestinationSecurityGroupId: !Ref EndpointSecurityGroup  # To endpoints only
+  # Tasks to interface endpoints (ECR, Logs) over HTTPS.
+  TaskToEndpointEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref EndpointSecurityGroup
       Description: HTTPS to interface endpoints (ECR, Logs)
 
-  TaskToS3Egress:                                           # Tasks may reach S3 (image layers)
-    Type: AWS::EC2::SecurityGroupEgress                     # Outbound rule
-    Properties:                                             # Rule settings
-      GroupId: !Ref TaskSecurityGroup                       # From tasks
-      IpProtocol: tcp                                       # TCP
-      FromPort: 443                                         # HTTPS
-      ToPort: 443                                           # HTTPS
-      DestinationPrefixListId: !Ref S3PrefixListId          # S3 ranges only (via gateway endpoint)
+  # Tasks to S3 over HTTPS, for ECR image layers via the gateway endpoint.
+  TaskToS3Egress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationPrefixListId: !Ref S3PrefixListId
       Description: HTTPS to S3 gateway endpoint (ECR image layers)
 
-  EndpointFromTaskIngress:                                  # Endpoints accept tasks only
-    Type: AWS::EC2::SecurityGroupIngress                    # Inbound rule
-    Properties:                                             # Rule settings
-      GroupId: !Ref EndpointSecurityGroup                   # Into endpoints
-      IpProtocol: tcp                                       # TCP
-      FromPort: 443                                         # HTTPS
-      ToPort: 443                                           # HTTPS
-      SourceSecurityGroupId: !Ref TaskSecurityGroup         # Only from tasks
+  # Interface endpoints accept HTTPS from tasks only.
+  EndpointFromTaskIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EndpointSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref TaskSecurityGroup
       Description: HTTPS only from tasks
 
-  S3GatewayEndpoint:                                        # Free private path to S3
-    Type: AWS::EC2::VPCEndpoint                             # Endpoint resource
-    Properties:                                             # Endpoint settings
-      VpcId: !Ref Vpc                                       # Parent VPC
-      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3     # S3 service
-      VpcEndpointType: Gateway                              # Route-table based, no hourly cost
-      RouteTableIds:                                        # Adds S3 route to these tables
-        - !Ref PrivateRouteTableA                           # Private AZ a
-        - !Ref PrivateRouteTableB                           # Private AZ b
-      PolicyDocument:                                       # Endpoint resource policy (not IAM inline)
-        Version: "2012-10-17"                               # Policy language version
-        Statement:                                          # Statements
-          - Sid: EcrImageLayersOnly                         # Only ECR's layer bucket
-            Effect: Allow                                   # Grant
-            Principal: "*"                                  # Any caller inside the VPC
-            Action: s3:GetObject                            # Download only
-            Resource: !Sub arn:${AWS::Partition}:s3:::prod-${AWS::Region}-starport-layer-bucket/*  # ECR layer bucket
+  # S3 gateway endpoint, limited to the AWS-owned bucket that serves ECR image layers.
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTableA
+        - !Ref PrivateRouteTableB
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EcrImageLayersOnly
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub arn:${AWS::Partition}:s3:::prod-${AWS::Region}-starport-layer-bucket/*
 
-  EcrApiEndpoint:                                           # Private path to the ECR API
-    Type: AWS::EC2::VPCEndpoint                             # Endpoint resource
-    Properties:                                             # Endpoint settings
-      VpcId: !Ref Vpc                                       # Parent VPC
-      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api  # ECR API (auth, metadata)
-      VpcEndpointType: Interface                            # ENI in each subnet
-      PrivateDnsEnabled: true                               # Normal ECR hostname resolves privately
-      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB] # One ENI per AZ
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]        # Endpoint firewall
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-vpce-ecr-api" }  # Name tag
+  # Interface endpoint for the ECR API.
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-vpce-ecr-api" }
 
-  EcrDkrEndpoint:                                           # Private path to the Docker registry
-    Type: AWS::EC2::VPCEndpoint                             # Endpoint resource
-    Properties:                                             # Endpoint settings
-      VpcId: !Ref Vpc                                       # Parent VPC
-      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr  # Registry (manifests)
-      VpcEndpointType: Interface                            # ENI in each subnet
-      PrivateDnsEnabled: true                               # Private DNS
-      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB] # One ENI per AZ
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]        # Endpoint firewall
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-vpce-ecr-dkr" }  # Name tag
+  # Interface endpoint for ECR Docker image pulls.
+  EcrDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-vpce-ecr-dkr" }
 
-  LogsEndpoint:                                             # Private path to CloudWatch Logs
-    Type: AWS::EC2::VPCEndpoint                             # Endpoint resource
-    Properties:                                             # Endpoint settings
-      VpcId: !Ref Vpc                                       # Parent VPC
-      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs   # CloudWatch Logs (awslogs driver)
-      VpcEndpointType: Interface                            # ENI in each subnet
-      PrivateDnsEnabled: true                               # Private DNS
-      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB] # One ENI per AZ
-      SecurityGroupIds: [!Ref EndpointSecurityGroup]        # Endpoint firewall
-      Tags:                                                 # Resource tags
-        - { Key: Name, Value: !Sub "${ResourcePrefix}-vpce-logs" }  # Name tag
+  # Interface endpoint for CloudWatch Logs.
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+      SecurityGroupIds: [!Ref EndpointSecurityGroup]
+      Tags:
+        - { Key: Name, Value: !Sub "${ResourcePrefix}-vpce-logs" }
 
-Outputs:                                                    # Values other stacks import
-  VpcId:                                                    # VPC ID
-    Value: !Ref Vpc                                         # Value
-    Export: { Name: !Sub "${ResourcePrefix}-vpc-id" }       # Export name
-  VpcCidr:                                                  # VPC range
-    Value: !Ref VpcCidr                                     # Value
-    Export: { Name: !Sub "${ResourcePrefix}-vpc-cidr" }     # Export name
-  PublicSubnetIds:                                          # Public subnets (comma list)
-    Value: !Join [",", [!Ref PublicSubnetA, !Ref PublicSubnetB]]  # Value
-    Export: { Name: !Sub "${ResourcePrefix}-public-subnet-ids" }  # Export name
-  PrivateSubnetIds:                                         # Private subnets (comma list)
-    Value: !Join [",", [!Ref PrivateSubnetA, !Ref PrivateSubnetB]]  # Value
-    Export: { Name: !Sub "${ResourcePrefix}-private-subnet-ids" }  # Export name
-  AlbSecurityGroupId:                                       # ALB SG
-    Value: !Ref AlbSecurityGroup                            # Value
-    Export: { Name: !Sub "${ResourcePrefix}-alb-sg-id" }    # Export name
-  TaskSecurityGroupId:                                      # Task SG
-    Value: !Ref TaskSecurityGroup                           # Value
-    Export: { Name: !Sub "${ResourcePrefix}-task-sg-id" }   # Export name
-  EndpointSecurityGroupId:                                  # Endpoint SG
-    Value: !Ref EndpointSecurityGroup                       # Value
-    Export: { Name: !Sub "${ResourcePrefix}-endpoint-sg-id" }  # Export name
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+    Export: { Name: !Sub "${ResourcePrefix}-vpc-id" }
+  VpcCidr:
+    Value: !Ref VpcCidr
+    Export: { Name: !Sub "${ResourcePrefix}-vpc-cidr" }
+  PublicSubnetIds:
+    Value: !Join [",", [!Ref PublicSubnetA, !Ref PublicSubnetB]]
+    Export: { Name: !Sub "${ResourcePrefix}-public-subnet-ids" }
+  PrivateSubnetIds:
+    Value: !Join [",", [!Ref PrivateSubnetA, !Ref PrivateSubnetB]]
+    Export: { Name: !Sub "${ResourcePrefix}-private-subnet-ids" }
+  AlbSecurityGroupId:
+    Value: !Ref AlbSecurityGroup
+    Export: { Name: !Sub "${ResourcePrefix}-alb-sg-id" }
+  TaskSecurityGroupId:
+    Value: !Ref TaskSecurityGroup
+    Export: { Name: !Sub "${ResourcePrefix}-task-sg-id" }
+  EndpointSecurityGroupId:
+    Value: !Ref EndpointSecurityGroup
+    Export: { Name: !Sub "${ResourcePrefix}-endpoint-sg-id" }

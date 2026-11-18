@@ -1,16 +1,17 @@
-# GitSync deployment file for stack onward-orders-lab-01-foundation
-template-file-path: templates/01-foundation.yaml   # Template this stack deploys
-parameters:                             # Parameter values for the stack
-  ResourcePrefix: onward-orders-lab     # Naming prefix
-  GitHubOrg: Ndaziramiyep               # Owner of the app repo
-  AppRepo: AWS-onward-orders-app            # Only repo allowed to push images
-  AppBranch: main                       # Only branch allowed to push images
-  ShaImagesToKeep: "20"                 # Rollback history depth
-tags:                                   # Company-standard tags, applied by GitSync to the stack and propagated to every taggable resource
-  Project: onward-orders                # Product / workload name
-  Environment: lab                      # Environment (lab, dev, prod)
-  Owner: patrick-ndaziramiye            # Accountable engineer
-  CostCenter: amalitech-training        # Billing owner
-  ManagedBy: cloudformation-gitsync     # How the resource is managed
-  Repository: AWS-onward-orders-app-infra       # Source repository
-# GitSync initial sync 2026-11-17
+# Template for stack onward-orders-lab-01-foundation: GitHub OIDC trust, the GitHub Actions role and the ECR repository.
+template-file-path: templates/01-foundation.yaml
+# Stack parameter values.
+parameters:
+  ResourcePrefix: onward-orders-lab
+  GitHubOrg: Ndaziramiyep
+  AppRepo: AWS-onward-orders-app
+  AppBranch: main
+  ShaImagesToKeep: "20"
+# Company-standard tags, propagated by GitSync to every taggable resource.
+tags:
+  Project: onward-orders
+  Environment: lab
+  Owner: patrick-ndaziramiye
+  CostCenter: amalitech-training
+  ManagedBy: cloudformation-gitsync
+  Repository: AWS-onward-orders-app-infra
