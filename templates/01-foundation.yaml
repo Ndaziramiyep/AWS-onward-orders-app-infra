@@ -112,6 +112,23 @@ Resources:
               - ecr:DescribeImages
             Resource: !GetAtt EcrRepository.Arn
 
+  # Read-only view of the release pipeline, so the app workflow can wait for the AWS release to finish.
+  # The pipeline is created later by the 06 delivery stack, so its ARN is built from the naming convention.
+  ReleaseStatusPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ResourcePrefix}-github-release-status-policy
+      Description: Read the status of the Onward Orders release pipeline only.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ReadReleasePipelineOnly
+            Effect: Allow
+            Action:
+              - codepipeline:ListPipelineExecutions
+              - codepipeline:GetPipelineExecution
+              - codepipeline:GetPipelineState
+            Resource: !Sub arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${ResourcePrefix}-pipeline
 
   # Role GitHub Actions assumes via OIDC, limited to the app repo's main branch (both subject formats).
   GitHubActionsRole:
@@ -136,6 +153,7 @@ Resources:
                   - !Sub repo:${GitHubOrg}@*/${AppRepo}@*:ref:refs/heads/${AppBranch}
       ManagedPolicyArns:
         - !Ref EcrPushPolicy
+        - !Ref ReleaseStatusPolicy
       Tags:
         - { Key: Name, Value: !Sub "${ResourcePrefix}-github-actions-role" }
 
