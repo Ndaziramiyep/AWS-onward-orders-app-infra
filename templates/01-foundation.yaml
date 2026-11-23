@@ -215,7 +215,8 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub ${ResourcePrefix}-github-actions-role
-      Description: Assumed by GitHub Actions via OIDC (temporary credentials only) to push images and the deploy bundle.
+      # Description kept unchanged on purpose: changing it needs iam:UpdateRoleDescription, which the GitSync role lacks.
+      Description: Assumed by GitHub Actions via OIDC (temporary credentials only) to push images.
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
