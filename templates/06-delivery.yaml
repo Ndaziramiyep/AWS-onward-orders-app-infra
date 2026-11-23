@@ -346,7 +346,8 @@ Resources:
         - Key: Name
           Value: !Sub "${ResourcePrefix}-pipeline-role"
 
-  # Release pipeline: ECR image + S3 deploy bundle -> CodeDeploy. Starts on image push only; a bundle
+  # Release pipeline: ECR image + S3 deploy bundle -> CodeDeploy. The bundle bucket and key are
+  # imported from 01-foundation, so 01 must be updated before this stack. Starts on image push only; a bundle
   # upload alone never starts it (PollForSourceChanges false, and no S3 EventBridge rule).
   Pipeline:
     Type: AWS::CodePipeline::Pipeline
