@@ -10,17 +10,19 @@ The application (Flask code, Dockerfile, CI workflows, and the deploy files `dep
 
 1. [The problem we are solving](#1-the-problem-we-are-solving)
 2. [The solution in one picture](#2-the-solution-in-one-picture)
-3. [Why each choice was made](#3-why-each-choice-was-made)
-4. [How this repo works: templates, deployment files, GitSync](#4-how-this-repo-works-templates-deployment-files-gitsync)
-5. [The templates, one by one](#5-the-templates-one-by-one)
-6. [How the stacks connect (exports)](#6-how-the-stacks-connect-exports)
-7. [Real examples, step by step](#7-real-examples-step-by-step)
-8. [Company standards and guardrails](#8-company-standards-and-guardrails)
-9. [Deploy everything from AWS CloudShell](#9-deploy-everything-from-aws-cloudshell)
-10. [Rebuild by hand](#10-rebuild-by-hand)
-11. [Release, rollback, and idle](#11-release-rollback-and-idle)
-12. [Cost in one table](#12-cost-in-one-table)
-13. [Things a new engineer must know](#13-things-a-new-engineer-must-know)
+3. [Roadmap: how the lab works, from zero to a release](#3-roadmap-how-the-lab-works-from-zero-to-a-release)
+4. [Why each choice was made](#4-why-each-choice-was-made)
+5. [Every file, in summary](#5-every-file-in-summary)
+6. [How this repo works: templates, deployment files, GitSync](#6-how-this-repo-works-templates-deployment-files-gitsync)
+7. [The templates, 00 to 06](#7-the-templates-00-to-06)
+8. [How the stacks connect (exports)](#8-how-the-stacks-connect-exports)
+9. [Real examples, step by step](#9-real-examples-step-by-step)
+10. [Company standards and guardrails](#10-company-standards-and-guardrails)
+11. [Deploy everything from AWS CloudShell](#11-deploy-everything-from-aws-cloudshell)
+12. [Rebuild by hand](#12-rebuild-by-hand)
+13. [Release, rollback, and idle](#13-release-rollback-and-idle)
+14. [Cost in one table](#14-cost-in-one-table)
+15. [Things a new engineer must know](#15-things-a-new-engineer-must-know)
 
 ---
 
@@ -99,7 +101,74 @@ Full diagram: [docs/architecture.md](docs/architecture.md). Costs: [docs/cost-an
 
 ---
 
-## 3. Why each choice was made
+## 3. Roadmap: how the lab works, from zero to a release
+
+The lab has two lives: a **one-time build** (phases A to D, in this exact order) and then **every release after that** (phase E), plus day-to-day **operation** (phase F). Each step names the file that defines it.
+
+### Phase A: one-time setup (the only hand-run stack)
+
+| Step | What happens | Defined in |
+|---|---|---|
+| A1 | Deploy the **00 bootstrap** stack with the CLI. It creates the GitSync role and, optionally, the CodeConnections link to GitHub. | [bootstrap/00-gitsync-role.yaml](bootstrap/00-gitsync-role.yaml) |
+| A2 | Authorize the GitHub connection once in the console (**Update pending connection**). This is the only console click in the lab. | AWS console |
+| A3 | Write this account's values (account ID, region, S3 prefix list, GitHub owner) into both repos and push them, because GitSync reads from GitHub. | [cloudshell-deploy.sh](cloudshell-deploy.sh) (`render_infra`, `render_app`) |
+
+### Phase B: build the base layers (01 → 03)
+
+For each stack: create it once with `aws cloudformation deploy`, attach a GitSync configuration, wait for `CREATE_COMPLETE`. From then on, Git drives every change.
+
+| Step | Stack | What it gives the next steps |
+|---|---|---|
+| B1 | **01 foundation** | GitHub OIDC trust, the GitHub Actions role, the ECR repository, the S3 **deploy bundle** bucket |
+| B2 | **02 network** | VPC in 2 AZs, public + private subnets, chained security groups, VPC endpoints (no NAT) |
+| B3 | **03 alb** | The public ALB, production (:80) and test (:8080) listeners, blue and green target groups |
+
+### Phase C: the first image
+
+| Step | What happens | Defined in |
+|---|---|---|
+| C1 | Push to `main` in the app repo (or run **build-and-push** by hand). Tests run, GitHub Actions logs in to AWS with OIDC, builds the image, pushes `:<sha>`, uploads the deploy bundle, pushes `:latest`. | App repo: `.github/workflows/build-push.yaml`, `scripts/build-push.sh` |
+| C2 | No pipeline exists yet, so nothing is released. The image simply waits in ECR. | — |
+
+The ECS service (04) can't start without an image, so this has to happen before phase D.
+
+### Phase D: run the app and wire up delivery (04 → 06)
+
+| Step | Stack | What happens |
+|---|---|---|
+| D1 | **04 ecs** | The cluster, roles and service start 2 tasks (one per AZ) from the bootstrap task definition, behind the blue target group. The app is now live on the ALB. |
+| D2 | **05 autoscaling** | Target tracking keeps CPU near 55% and memory near 75%, between 2 and 6 tasks. |
+| D3 | **06 delivery** | Alarms, CodeDeploy blue/green, CodePipeline and the EventBridge rule. From now on, every `:latest` push is a release. |
+| D4 | Verify: ALB returns 200 on `/health`, no NAT, no default route in private subnets, no inline policies, service stable. | `bash cloudshell-deploy.sh verify` |
+
+### Phase E: every release after that (the only manual step is the merge)
+
+```
+ E1  Developer merges to main in the app repo
+ E2  test.yaml: pytest
+ E3  build-push: OIDC login → build image → push :<sha>
+ E4  make-bundle.sh: deploy/taskdef.yaml → taskdef.json, zip with appspec.yaml → upload to S3 bundle bucket
+ E5  push :latest            ← last, so the run it starts reads this commit's bundle
+ E6  ECR "PUSH latest" event → EventBridge rule → CodePipeline starts (no polling)
+ E7  Pipeline Source: image URI from ECR + bundle from S3
+ E8  Pipeline Deploy: register a new task definition revision → CodeDeploy blue/green
+ E9  Green tasks start → 10% of traffic for 5 min while 3 alarms watch → 100% → blue kept 5 min
+ E10 release.yaml / wait-for-release.sh turns the GitHub check green (red if CodeDeploy rolled back)
+```
+
+### Phase F: operating it
+
+| Need | What you do | What happens |
+|---|---|---|
+| Change infrastructure | Edit a template or deployment file, open a PR, merge | CI lints it; GitSync updates only the stacks whose files changed |
+| More load | Nothing | Auto scaling adds tasks (05) |
+| Bad release | Nothing | An alarm fires and CodeDeploy rolls back by itself (06) |
+| Go back to an older version | App repo: **Actions → rollback** with a commit SHA | That commit's bundle is uploaded and its image re-tagged `latest`, which starts a normal release |
+| Stop paying while idle | `bash cloudshell-deploy.sh teardown` | Stacks 06 → 01 are deleted; `deploy` rebuilds everything from the repos |
+
+---
+
+## 4. Why each choice was made
 
 | Problem | Applied solution | Why this one | Rejected alternative |
 |---|---|---|---|
@@ -119,25 +188,61 @@ Full diagram: [docs/architecture.md](docs/architecture.md). Costs: [docs/cost-an
 
 ---
 
-## 4. How this repo works: templates, deployment files, GitSync
+## 5. Every file, in summary
 
-### Layout
+### This repo: AWS-onward-orders-app-infra
 
 ```
 AWS-onward-orders-app-infra/
 ├── bootstrap/00-gitsync-role.yaml      # The one stack GitSync cannot create (it makes GitSync's own role)
 ├── templates/                          # One CloudFormation template per layer, in build order
-│   ├── 01-foundation.yaml              #   OIDC provider, GitHub Actions role, ECR repository, deploy bundle bucket
-│   ├── 02-network.yaml                 #   VPC, subnets, route tables, security groups, VPC endpoints
-│   ├── 03-alb.yaml                     #   ALB, prod + test listeners, blue + green target groups
-│   ├── 04-ecs.yaml                     #   Cluster, logs, task roles, bootstrap task definition, service
-│   ├── 05-autoscaling.yaml             #   Target tracking on CPU and memory, optional night schedule
-│   └── 06-delivery.yaml                #   Alarms, CodeDeploy, CodePipeline, EventBridge rule
+│   ├── 01-foundation.yaml … 06-delivery.yaml
 ├── deployments/*.deployment.yaml       # GitSync file per stack: which template + parameters + tags
-├── .github/workflows/lint.yaml         # CI: cfn-lint + inline-policy check + private-route check on every PR
-├── cloudshell-deploy.sh                # One command that does everything from AWS CloudShell
+├── .github/workflows/lint.yaml         # CI on every PR and push to main
+├── cloudshell-deploy.sh                # One command that builds, checks or tears down everything
 └── docs/                               # Architecture diagram, cost analysis, discovery report
 ```
+
+| File | What it does |
+|---|---|
+| [bootstrap/00-gitsync-role.yaml](bootstrap/00-gitsync-role.yaml) | GitSync role, its deploy permissions, and optionally the GitHub connection. Deployed once by hand. |
+| [templates/01-foundation.yaml](templates/01-foundation.yaml) | GitHub OIDC provider, GitHub Actions role and its 3 policies, ECR repository, deploy bundle bucket |
+| [templates/02-network.yaml](templates/02-network.yaml) | VPC, 4 subnets in 2 AZs, route tables, internet gateway, 3 security groups, 4 VPC endpoints |
+| [templates/03-alb.yaml](templates/03-alb.yaml) | Internet-facing ALB, production and test listeners (optional HTTPS), blue and green target groups |
+| [templates/04-ecs.yaml](templates/04-ecs.yaml) | Fargate cluster, log group, task execution and task roles, bootstrap task definition, ECS service |
+| [templates/05-autoscaling.yaml](templates/05-autoscaling.yaml) | Scalable target (2–6 tasks), CPU and memory target tracking, optional office-hours schedule |
+| [templates/06-delivery.yaml](templates/06-delivery.yaml) | Artifact bucket, 3 rollback alarms, CodeDeploy app and deployment group, CodePipeline, EventBridge rule, their roles |
+| `deployments/0N-*.deployment.yaml` (6 files) | For each stack: the template path, its parameter values and the company tags. GitSync reads these, not the templates directly. |
+| [.github/workflows/lint.yaml](.github/workflows/lint.yaml) | `cfn-lint` on every template, fails on inline IAM policies, fails on any route added to a private route table |
+| [cloudshell-deploy.sh](cloudshell-deploy.sh) | `deploy` (phases A–D), `publish` (write account values into both repos), `status`, `verify`, `teardown` |
+| [docs/architecture.md](docs/architecture.md), `architecture.png`, `architecture.drawio` | Architecture diagram (editable source and picture) and the numbered flow of a change |
+| [docs/cost-analysis.md](docs/cost-analysis.md) | Monthly cost per component, NAT vs endpoints, how teardown brings it to ~$0 |
+| [docs/discovery-report.pdf](docs/discovery-report.pdf) | The discovery report: stakeholder needs and the decisions taken |
+| `.gitattributes`, `.gitignore` | Line endings (PDF/PNG marked binary) and ignored local files |
+
+### The app repo: [AWS-onward-orders-app](https://github.com/Ndaziramiyep/AWS-onward-orders-app)
+
+| File | What it does |
+|---|---|
+| `app/main.py`, `app/settings.py`, `app/templates/index.html`, `app/requirements.txt` | The Flask order app: `/` (order page, shows the task's AZ), `POST /orders`, `/health`, `/version`, and `/cpu` (burns CPU to demo auto scaling). `FORCE_UNHEALTHY` in `settings.py` makes `/health` fail, to test rollback. |
+| `tests/test_main.py` | Pytest suite, run on every PR and before every build |
+| `Dockerfile`, `.dockerignore` | Builds the image (Gunicorn on port 8080); the commit SHA is baked in as the app version |
+| `deploy/taskdef.yaml` | The task definition the pipeline deploys: CPU, memory, port, container health check, logs, role ARNs. `<IMAGE1_NAME>` is replaced with the exact image URI. Converted to `taskdef.json` in the bundle. |
+| `deploy/appspec.yaml` | CodeDeploy AppSpec: which container and port receive traffic. `<TASK_DEFINITION>` is filled in by the pipeline. |
+| `.github/workflows/test.yaml` | Runs the tests (on PRs, and called by build-push) |
+| `.github/workflows/build-push.yaml` | On push to `main`: test → build and push → wait for the release |
+| `.github/workflows/release.yaml` | Waits until CodePipeline and CodeDeploy finish for one image digest |
+| `.github/workflows/rollback.yaml` | Manual rollback to an earlier commit's image and deploy files |
+| `.github/actions/aws-login/action.yaml` | Shared OIDC login step; holds the GitHub Actions role ARN |
+| `scripts/config.sh` | Shared settings: region, ECR repository, pipeline name, bundle bucket and key |
+| `scripts/build-push.sh` | Builds and pushes `:<sha>`, uploads the deploy bundle, then pushes `:latest` |
+| `scripts/make-bundle.sh` | Builds the deploy bundle zip for one commit (also handles old commits with root-level `taskdef.json`) |
+| `scripts/wait-for-release.sh` | Polls the pipeline run for an image digest and exits with its result |
+| `scripts/rollback.sh` | Uploads an old commit's bundle, re-tags its image as `latest`, waits for the release |
+
+---
+
+## 6. How this repo works: templates, deployment files, GitSync
 
 ### Why six small stacks instead of one big template
 
@@ -191,13 +296,27 @@ Three behaviours matter:
 
 ---
 
-## 5. The templates, one by one
+## 7. The templates, 00 to 06
 
 Every template takes `ResourcePrefix` (default `onward-orders-lab`). That parameter is how the company naming standard `<project>-<environment>-<resource>` is applied everywhere: `onward-orders-lab-alb`, `onward-orders-lab-cluster`, and so on.
+
+Each section below gives the **problem** the stack solves, its **parameters** (the values set in its deployment file), its **resources**, and what it **imports** from earlier stacks and **exports** to later ones.
+
+| Stack | In one line | Resources |
+|---|---|---|
+| 00 bootstrap | Lets GitSync deploy everything else | 4 |
+| 01 foundation | Who may push, and where images and deploy files live | 8 |
+| 02 network | A private network with no internet path | 24 |
+| 03 alb | The only public door, with two slots for blue/green | 6 |
+| 04 ecs | Where the app runs | 7 |
+| 05 autoscaling | More tasks under load, fewer when quiet | 3 |
+| 06 delivery | Turns an image push into a safe, gradual release | 14 |
 
 ### 00 — `bootstrap/00-gitsync-role.yaml` (deployed once, with the CLI)
 
 **Problem:** GitSync needs an IAM role to deploy stacks, but that role cannot come from GitSync itself. It's a chicken-and-egg problem.
+
+**Parameters:** `ResourcePrefix`, `ExistingConnectionArn` (empty = create a new connection).
 
 **Solution:** one small stack, deployed once by hand, that creates:
 
@@ -217,6 +336,8 @@ Every template takes `ResourcePrefix` (default `onward-orders-lab`). That parame
 ### 01 — `templates/01-foundation.yaml`: identity and image registry
 
 **Problem:** GitHub Actions must push images and deploy files to AWS **without stored access keys**, and both need a private, safe home.
+
+**Parameters:** `GitHubOrg`, `AppRepo`, `AppBranch` (who the role trusts), `ExistingOidcProviderArn` (reuse an existing provider), `ShaImagesToKeep` (20), `BundleObjectKey` (`deploy/bundle.zip`). **Imports:** nothing.
 
 | Resource | Key settings | Why |
 |---|---|---|
@@ -253,6 +374,8 @@ This matches the second pattern, so AWS returns credentials that expire within a
 ### 02 — `templates/02-network.yaml`: the private network
 
 **Problem:** the containers must pull images and write logs, but must have **no internet path**, and must survive an AZ outage.
+
+**Parameters:** `VpcCidr` and the four subnet CIDRs, `S3PrefixListId` (the region's S3 prefix list, found by the deploy script), `TestListenerIngressCidr` (who may reach :8080, the VPC only), `AppPort` (8080). **Imports:** nothing.
 
 **Subnets and routes:**
 
@@ -301,6 +424,8 @@ A detail worth explaining: a new security group allows **all outbound traffic by
 
 **Problem:** customers need one stable public address, traffic must only reach healthy tasks, and blue/green needs a place to put the new version **before** it gets live traffic.
 
+**Parameters:** `CertificateArn` (empty = HTTP on :80; set = HTTPS on :443 and :80 redirects), `TestListenerPort` (8080), `AppPort` (8080), `HealthCheckPath` (`/health`). **Imports from 02:** VPC ID, public subnet IDs, ALB security group.
+
 | Resource | Key settings | Why |
 |---|---|---|
 | `LoadBalancer` | internet-facing, both public subnets, `drop_invalid_header_fields` on | The single public entry point, present in 2 AZs |
@@ -319,6 +444,8 @@ A detail worth explaining: a new security group allows **all outbound traffic by
 ### 04 — `templates/04-ecs.yaml`: where the app runs
 
 **Problem:** run the container with no servers to manage, privately, in both AZs, with minimal permissions, and let CodeDeploy (not CloudFormation) own releases.
+
+**Parameters:** `TaskCpu` ("256"), `TaskMemory` ("512"), `AppPort` (8080), `BootstrapImageTag` (`latest`), `DesiredCount` (2), `HealthCheckGracePeriod` (60 s), `LogRetentionDays` (14). **Imports:** ECR URI (01); private subnet IDs and task security group (02); blue target group ARN (03).
 
 | Resource | Key settings | Why |
 |---|---|---|
@@ -347,6 +474,8 @@ A detail worth explaining: a new security group allows **all outbound traffic by
 
 **Problem:** peak days need more capacity; quiet hours shouldn't pay for it; nobody should have to click anything.
 
+**Parameters:** `MinCapacity` (2), `MaxCapacity` (6), `CpuTargetPercent` (55), `MemoryTargetPercent` (75), `ScaleOutCooldown` (60 s), `ScaleInCooldown` (300 s), `EnableOfficeHoursSchedule` ("false"). **Imports from 04:** cluster name, service name. **Exports:** nothing; no later stack depends on it.
+
 | Resource | Settings |
 |---|---|
 | `ScalableTarget` | The service's `DesiredCount`, min **2**, max **6**. Optional schedule: 0 tasks at 19:00 and back to 2 at 07:00, Mon–Fri UTC. |
@@ -365,6 +494,8 @@ A detail worth explaining: a new security group allows **all outbound traffic by
 ### 06 — `templates/06-delivery.yaml`: the release pipeline
 
 **Problem:** a new image must go live **automatically**, **gradually**, and **undo itself** if it's bad.
+
+**Parameters:** `WatchedImageTag` (`latest`), `DeploymentConfigName` (canary 10% for 5 min; linear and all-at-once are allowed alternatives), `BlueTerminationWaitMinutes` (5), `Target5xxThreshold` (5). **Imports:** ECR name and ARN, bundle bucket ARN, name and key (01); ALB and target group names, both listener ARNs (03); cluster, service and both task role ARNs (04). **Exports:** nothing; its outputs (pipeline, CodeDeploy app and group, artifact bucket) are read by the deploy script.
 
 | Resource | What it does |
 |---|---|
@@ -396,7 +527,7 @@ t≈11m   blue terminated (the 5-minute rollback window is over)
 
 ---
 
-## 6. How the stacks connect (exports)
+## 8. How the stacks connect (exports)
 
 Stacks never hard-code each other's IDs. Each one **exports** values named `onward-orders-lab-*` and later stacks **import** them. CloudFormation then *refuses* to delete a stack whose exports are still in use, which protects the build order.
 
@@ -428,7 +559,7 @@ flowchart LR
 
 ---
 
-## 7. Real examples, step by step
+## 9. Real examples, step by step
 
 ### Example A: a customer opens the website
 
@@ -479,11 +610,11 @@ Revert the bad commit on `main` too, or the next push ships it again.
 
 ### Example F: changing infrastructure
 
-To give tasks more memory: edit `TaskMemory: "1024"` in `deployments/04-ecs.deployment.yaml`, then PR → CI lint → merge. GitSync updates only the 04 stack. (For the *running* app, change `memory` in the app repo's `deploy/taskdef.yaml` instead, because CodeDeploy owns the live task definition. See [section 14](#14-things-a-new-engineer-must-know).)
+To give tasks more memory: edit `TaskMemory: "1024"` in `deployments/04-ecs.deployment.yaml`, then PR → CI lint → merge. GitSync updates only the 04 stack. (For the *running* app, change `memory` in the app repo's `deploy/taskdef.yaml` instead, because CodeDeploy owns the live task definition. See [section 15](#15-things-a-new-engineer-must-know).)
 
 ---
 
-## 8. Company standards and guardrails
+## 10. Company standards and guardrails
 
 - **Naming:** `<project>-<environment>-<resource>`, for example `onward-orders-lab-alb`. It comes from the single `ResourcePrefix` parameter.
 - **Tags:** every deployment file sets `Project`, `Environment`, `Owner`, `CostCenter`, `ManagedBy` and `Repository`. GitSync applies them to the stack, and CloudFormation propagates them to every taggable resource. Each resource also gets a `Name` tag. Finance can filter costs with `CostCenter=amalitech-training`.
@@ -497,7 +628,7 @@ So a PR that adds an inline policy or gives the private subnets a route to the i
 
 ---
 
-## 9. Deploy everything from AWS CloudShell
+## 11. Deploy everything from AWS CloudShell
 
 ```bash
 git clone https://github.com/Ndaziramiyep/AWS-onward-orders-app-infra.git && cd AWS-onward-orders-app-infra
@@ -527,7 +658,7 @@ Settings such as `AWS_REGION`, `PREFIX`, `INFRA_REPO`, `APP_REPO` and `CONNECTIO
 
 ---
 
-## 10. Rebuild by hand
+## 12. Rebuild by hand
 
 Region `eu-west-1`, account `648637468459`, from the repo root with admin credentials.
 
@@ -550,7 +681,7 @@ The first image push happens before stack 06 exists, so it doesn't trigger a pip
 
 ---
 
-## 11. Release, rollback, and idle
+## 13. Release, rollback, and idle
 
 - **Release:** merge to `main` in the app repo. Nothing else. The app workflow's `release` job runs `scripts/wait-for-release.sh`, so the GitHub check stays yellow during the canary and the rollback window and turns green only when the pipeline run for that image succeeds (red if CodeDeploy rolls back). During the canary about 10% of users already see the new version; that is the canary working, not a leak.
 - **Automatic rollback:** if the 5XX alarm or either unhealthy-host alarm fires, or the deployment fails, CodeDeploy returns traffic to the old tasks.
@@ -560,7 +691,7 @@ The first image push happens before stack 06 exists, so it doesn't trigger a pip
 
 ---
 
-## 12. Cost in one table
+## 14. Cost in one table
 
 eu-west-1, always on, 2 tasks, approximate list prices (details: [docs/cost-analysis.md](docs/cost-analysis.md)).
 
@@ -570,7 +701,7 @@ eu-west-1, always on, 2 tasks, approximate list prices (details: [docs/cost-anal
 | ALB | $24 |
 | 3 interface endpoints × 2 AZs | $48 |
 | S3 gateway endpoint | $0 |
-| ECR, CloudWatch, CodePipeline, CodeDeploy | ~$3 |
+| ECR, S3 (artifacts + deploy bundles), CloudWatch, CodePipeline, CodeDeploy | ~$3 |
 | **Total** | **~$94** |
 | After `teardown` | **~$0** |
 
@@ -578,10 +709,20 @@ eu-west-1, always on, 2 tasks, approximate list prices (details: [docs/cost-anal
 
 ---
 
-## 13. Things a new engineer must know
+## 15. Things a new engineer must know
 
 1. **CodeDeploy owns the service after creation.** Don't change `TaskDefinition` or `LoadBalancers` in `04-ecs.yaml`, or the listener default actions in `03-alb.yaml`. After a release, production may point at *green*, and a stack update would fight CodeDeploy. App and runtime changes ship through the app repo (`deploy/taskdef.yaml`, delivered in the S3 deploy bundle).
 2. **Stack order matters.** Create 01 → 06, delete 06 → 01. Exports block wrong-order deletes.
 3. **Tasks stuck in PROVISIONING, or `CannotPullContainerError`,** almost always mean a missing endpoint (`ecr.api`, `ecr.dkr`, `logs`, S3 gateway) or `endpoint-sg` not allowing 443 from `task-sg`.
 4. **ECR tags:** SHA tags are immutable. Only `latest` can move, because `latest` is what the pipeline watches.
 5. **Run `cloudshell-deploy.sh` from a clone of this repo**, because it reads `templates/`, `bootstrap/` and `deployments/` next to it.
+6. **A new export and its first importer go in separate pushes.** GitSync syncs stacks independently, so if one commit adds an export to 01 and starts importing it in 06, 06 can run first and fail with *"No export named … found"*. Merge the 01 change, wait for `UPDATE_COMPLETE`, then merge the 06 change.
+7. **The GitSync role can't do everything.** Its IAM permissions are a fixed list in the bootstrap stack. For example, it has no `iam:UpdateRoleDescription`, so editing a role's `Description` fails the update *and* its rollback (`UPDATE_ROLLBACK_FAILED`). Leave role descriptions alone, or add the permission to the bootstrap stack first.
+8. **Any change made outside GitSync blocks the stack's sync.** After a manual fix (for example `continue-update-rollback`), GitSync refuses to sync that stack until the blocker is cleared:
+   ```bash
+   aws codeconnections get-sync-blocker-summary --sync-type CFN_STACK_SYNC --resource-name <stack>
+   aws codeconnections update-sync-blocker --sync-type CFN_STACK_SYNC --resource-name <stack> \
+     --id <blocker-id> --resolved-reason "<what you fixed>"
+   ```
+   GitSync then retries the latest commit by itself.
+9. **The deploy files are app code, not infrastructure.** To change CPU, memory, the health check or environment variables of the running app, edit `deploy/taskdef.yaml` in the app repo. Stack 06 never names or contains these files; it only reads the bundle from S3.
