@@ -253,14 +253,12 @@ render_infra() {
   local d="$1"
   local foundation="$d/deployments/01-foundation.deployment.yaml"
   local network="$d/deployments/02-network.deployment.yaml"
-  local delivery="$d/deployments/06-delivery.deployment.yaml"
 
   render_common "$d" 'deployments/*.deployment.yaml' '.github/workflows/*.yaml' README.md
 
-  sed -i "s/^\(  GitHubOrg:\) *[^ #]*/\1 $GITHUB_OWNER/" "$foundation" "$delivery"
-  sed -i "s/^\(  AppRepo:\) *[^ #]*/\1 $APP_REPO/"      "$foundation" "$delivery"
-  sed -i "s/^\(  AppBranch:\) *[^ #]*/\1 $BRANCH/"      "$foundation" "$delivery"
-  sed -i "s#^  ConnectionArn: .*#  ConnectionArn: $CONNECTION_ARN#" "$delivery"
+  sed -i "s/^\(  GitHubOrg:\) *[^ #]*/\1 $GITHUB_OWNER/" "$foundation"
+  sed -i "s/^\(  AppRepo:\) *[^ #]*/\1 $APP_REPO/"      "$foundation"
+  sed -i "s/^\(  AppBranch:\) *[^ #]*/\1 $BRANCH/"      "$foundation"
   sed -i "s/^\(  S3PrefixListId:\) *[^ #]*/\1 $S3_PREFIX_LIST/" "$network"
 
   if [[ -n "$OIDC_REUSE_ARN" ]]; then
@@ -268,12 +266,16 @@ render_infra() {
   fi
 }
 
-# Renders the app repo's task definition and workflow.
+# Renders the app repo's task definition, release settings (scripts/config.sh) and AWS login action.
 render_app() {
   local d="$1"
-  render_common "$d" taskdef.json '.github/workflows/*.yaml' README.md
-  sed -i -e "s/^\(  ECR_REPOSITORY:\) *[^ #]*/\1 $PREFIX/" \
-         -e "s/^\(  PIPELINE_NAME:\) *[^ #]*/\1 $PREFIX-pipeline/" "$d/.github/workflows/build-push.yaml"
+  render_common "$d" deploy/taskdef.yaml scripts/config.sh .github/actions/aws-login/action.yaml \
+    '.github/workflows/*.yaml' README.md
+  sed -i -e "s/\(ECR_REPOSITORY:-\)[^}]*/\1$PREFIX/" \
+         -e "s/\(PIPELINE_NAME:-\)[^}]*/\1$PREFIX-pipeline/" \
+         -e "s/\(BUNDLE_BUCKET:-\)[^}]*/\1$PREFIX-bundle-$ACCOUNT_ID-$REGION/" "$d/scripts/config.sh"
+  sed -i "s#role/[a-z0-9-]*-github-actions-role#role/$PREFIX-github-actions-role#" \
+    "$d/.github/actions/aws-login/action.yaml"
 }
 
 # Finds the regional S3 prefix list and whether to reuse an OIDC provider (only if the foundation stack did not create it, since flipping the condition would delete it).
@@ -677,6 +679,9 @@ cmd_teardown() {
     [[ "$(stack_status "$stack")" != NOT_FOUND ]] || continue
     if [[ "$n" == 06-delivery ]]; then
       empty_bucket "$(stack_out "$stack" ArtifactBucketName)"
+    fi
+    if [[ "$n" == 01-foundation ]]; then
+      empty_bucket "$(stack_out "$stack" BundleBucketName)"
     fi
     info "Deleting $stack"
     aws cloudformation delete-stack --stack-name "$stack"

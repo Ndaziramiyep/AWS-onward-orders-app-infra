@@ -3,10 +3,6 @@ template-file-path: templates/06-delivery.yaml
 # Stack parameter values.
 parameters:
   ResourcePrefix: onward-orders-lab
-  ConnectionArn: arn:aws:codeconnections:eu-west-1:648637468459:connection/387b1181-82b8-4718-b249-b81bfe30c3c0
-  GitHubOrg: Ndaziramiyep
-  AppRepo: AWS-onward-orders-app
-  AppBranch: main
   DeploymentConfigName: CodeDeployDefault.ECSCanary10Percent5Minutes
   BlueTerminationWaitMinutes: "5"
 # Company-standard tags, propagated by GitSync to every taggable resource.

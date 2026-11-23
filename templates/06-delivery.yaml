@@ -2,6 +2,8 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   Onward Logistics - 06 delivery. ECR push (tag latest) -> EventBridge -> CodePipeline ->
   CodeDeploy blue/green on ECS with canary traffic shifting and alarm-based auto rollback.
+  The task definition and AppSpec are not defined here: GitHub Actions zips them into the deploy
+  bundle in the S3 bundle bucket (01 foundation) and the pipeline reads them from there.
   All roles use customer-managed or AWS-managed policies only.
 
 Parameters:
@@ -10,18 +12,6 @@ Parameters:
     Default: onward-orders-lab
     AllowedPattern: "^[a-z][a-z0-9-]{2,24}$"
     Description: Naming prefix <project>-<environment> applied to every resource.
-  ConnectionArn:
-    Type: String
-    Description: CodeConnections GitHub connection (output of the 00 bootstrap stack).
-  GitHubOrg:
-    Type: String
-    Default: Ndaziramiyep
-  AppRepo:
-    Type: String
-    Default: AWS-onward-orders-app
-  AppBranch:
-    Type: String
-    Default: main
   WatchedImageTag:
     Type: String
     Default: latest
@@ -279,12 +269,22 @@ Resources:
             Action: ecr:DescribeImages
             Resource: !ImportValue
               "Fn::Sub": "${ResourcePrefix}-ecr-repo-arn"
-          - Sid: GitHubSource
+          - Sid: BundleSource
             Effect: Allow
             Action:
-              - codeconnections:UseConnection
-              - codestar-connections:UseConnection
-            Resource: !Ref ConnectionArn
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:GetBucketVersioning
+              - s3:GetBucketLocation
+            Resource:
+              - !ImportValue
+                "Fn::Sub": "${ResourcePrefix}-bundle-bucket-arn"
+              - !Sub
+                - ${BundleBucketArn}/${BundleObjectKey}
+                - BundleBucketArn: !ImportValue
+                    "Fn::Sub": "${ResourcePrefix}-bundle-bucket-arn"
+                  BundleObjectKey: !ImportValue
+                    "Fn::Sub": "${ResourcePrefix}-bundle-object-key"
           - Sid: CodeDeploy
             Effect: Allow
             Action:
@@ -346,7 +346,8 @@ Resources:
         - Key: Name
           Value: !Sub "${ResourcePrefix}-pipeline-role"
 
-  # Release pipeline: ECR image + app repo specs -> CodeDeploy. Starts on image push, never on a commit alone.
+  # Release pipeline: ECR image + S3 deploy bundle -> CodeDeploy. Starts on image push only; a bundle
+  # upload alone never starts it (PollForSourceChanges false, and no S3 EventBridge rule).
   Pipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
@@ -373,20 +374,20 @@ Resources:
               OutputArtifacts:
                 - Name: ImageArtifact
               RunOrder: 1
-            - Name: DeploySpecs
+            - Name: DeployBundle
               ActionTypeId:
                 Category: Source
                 Owner: AWS
-                Provider: CodeStarSourceConnection
+                Provider: S3
                 Version: "1"
               Configuration:
-                ConnectionArn: !Ref ConnectionArn
-                FullRepositoryId: !Sub ${GitHubOrg}/${AppRepo}
-                BranchName: !Ref AppBranch
-                DetectChanges: false
-                OutputArtifactFormat: CODE_ZIP
+                S3Bucket: !ImportValue
+                  "Fn::Sub": "${ResourcePrefix}-bundle-bucket-name"
+                S3ObjectKey: !ImportValue
+                  "Fn::Sub": "${ResourcePrefix}-bundle-object-key"
+                PollForSourceChanges: false
               OutputArtifacts:
-                - Name: SourceArtifact
+                - Name: BundleArtifact
               RunOrder: 1
         - Name: Deploy
           Actions:
@@ -399,14 +400,14 @@ Resources:
               Configuration:
                 ApplicationName: !Ref CodeDeployApplication
                 DeploymentGroupName: !Ref DeploymentGroup
-                TaskDefinitionTemplateArtifact: SourceArtifact
-                TaskDefinitionTemplatePath: taskdef.json
-                AppSpecTemplateArtifact: SourceArtifact
-                AppSpecTemplatePath: appspec.yaml
+                # Both specs come from the zip GitHub Actions uploaded; the action reads its default
+                # files (taskdef.json, appspec.yaml) from the root of that bundle.
+                TaskDefinitionTemplateArtifact: BundleArtifact
+                AppSpecTemplateArtifact: BundleArtifact
                 Image1ArtifactName: ImageArtifact
                 Image1ContainerName: IMAGE1_NAME
               InputArtifacts:
-                - Name: SourceArtifact
+                - Name: BundleArtifact
                 - Name: ImageArtifact
               RunOrder: 1
       Tags:

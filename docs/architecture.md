@@ -12,10 +12,10 @@ To change the diagram, edit `architecture.drawio` in draw.io and export it again
 ## Numbered flow of a change
 
 1. A developer merges to `main` in **AWS-onward-orders-app**. This is the only manual step.
-2. **GitHub Actions** runs the tests, then assumes `onward-orders-lab-github-actions-role` through **OIDC**. It gets temporary STS credentials, with no stored keys. It builds the image and pushes `:<sha>` (immutable) and `:latest` to **ECR**.
+2. **GitHub Actions** runs the tests, then assumes `onward-orders-lab-github-actions-role` through **OIDC**. It gets temporary STS credentials, with no stored keys. It builds the image and pushes `:<sha>` (immutable) to **ECR**. It then zips `taskdef.json` (converted from `deploy/taskdef.yaml`) and `appspec.yaml` into the deploy bundle, uploads it to the **S3 bundle bucket**, and only then pushes `:latest`.
 3. ECR emits an **ECR Image Action PUSH** event for `latest`.
 4. The **EventBridge** rule starts **CodePipeline**. There is no polling.
-5. The pipeline collects the image URI from ECR, plus `appspec.yaml` and `taskdef.json` from the app repo. It then registers a new task definition revision and calls **CodeDeploy**.
+5. The pipeline collects the image URI from ECR, plus the deploy bundle (`taskdef.json` and `appspec.yaml`) from S3 (the bundle upload never starts the pipeline on its own). The pipeline then registers a new task definition revision and calls **CodeDeploy**.
 6. **CodeDeploy** starts a green task set in the private subnets of both AZs and registers it in the idle target group. It shifts 10% of production traffic for 5 minutes, then 100%. If a 5XX or unhealthy-host alarm fires, it rolls back automatically. The old tasks stay up 5 minutes for a fast rollback, then terminate.
 
 ## Security boundaries

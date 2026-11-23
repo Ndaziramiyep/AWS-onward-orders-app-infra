@@ -1,7 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Onward Logistics - 01 foundation. GitHub OIDC provider, the GitHub Actions role (ECR push
-  only, trusted for the app repo main branch only), and the private ECR repository.
+  Onward Logistics - 01 foundation. GitHub OIDC provider, the GitHub Actions role (ECR push and
+  deploy-bundle upload only, trusted for the app repo main branch only), the private ECR
+  repository, and the deploy bundle bucket (taskdef.json + appspec.yaml zipped by GitHub Actions).
   No IAM users, no access keys, no inline policies.
 
 Parameters:
@@ -33,6 +34,13 @@ Parameters:
     Default: 20
     MinValue: 5
     Description: Number of git-SHA tagged images kept in ECR for rollback.
+  BundleObjectKey:
+    Type: String
+    Default: deploy/bundle.zip
+    AllowedPattern: "^[a-zA-Z0-9_./-]+\\.zip$"
+    Description: >-
+      S3 key GitHub Actions uploads the deploy bundle to (a zip holding taskdef.json and
+      appspec.yaml at its root). The pipeline's S3 source action reads the same key.
 
 Conditions:
   CreateOidcProvider: !Equals
@@ -91,6 +99,74 @@ Resources:
         - Key: Name
           Value: !Ref ResourcePrefix
 
+  # Deploy bundle bucket. GitHub Actions uploads taskdef.json + appspec.yaml as one zip and the
+  # pipeline reads it. The CodePipeline S3 source action requires versioning. The bucket is here,
+  # not in 06, because the first image and bundle are pushed before the 06 delivery stack exists.
+  BundleBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ResourcePrefix}-bundle-${AWS::AccountId}-${AWS::Region}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-bundles
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+              NewerNoncurrentVersions: 20
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ResourcePrefix}-bundle"
+
+  # Denies any non-HTTPS access to the bundle bucket.
+  BundleBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BundleBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt BundleBucket.Arn
+              - !Sub ${BundleBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # Upload the deploy bundle to its one key and nothing else.
+  GitHubActionsBundlePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ResourcePrefix}-github-bundle-upload-policy
+      Description: Upload the deploy bundle (taskdef.json + appspec.yaml zip) to its one S3 key only.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: UploadBundleOnly
+            Effect: Allow
+            Action: s3:PutObject
+            Resource: !Sub ${BundleBucket.Arn}/${BundleObjectKey}
+
   # Push access to this repository only.
   GitHubActionsPushPolicy:
     Type: AWS::IAM::ManagedPolicy
@@ -139,7 +215,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub ${ResourcePrefix}-github-actions-role
-      Description: Assumed by GitHub Actions via OIDC (temporary credentials only) to push images.
+      Description: Assumed by GitHub Actions via OIDC (temporary credentials only) to push images and the deploy bundle.
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -160,6 +236,7 @@ Resources:
                   - !Sub repo:${GitHubOrg}@*/${AppRepo}@*:ref:refs/heads/${AppBranch}
       ManagedPolicyArns:
         - !Ref GitHubActionsPushPolicy
+        - !Ref GitHubActionsBundlePolicy
         - !Ref GitHubActionsReleasePolicy
       Tags:
         - Key: Name
@@ -183,3 +260,17 @@ Outputs:
     Value: !GetAtt GitHubActionsRole.Arn
     Export:
       Name: !Sub "${ResourcePrefix}-github-actions-role-arn"
+  BundleBucketName:
+    Description: Bucket GitHub Actions uploads the deploy bundle to (BUNDLE_BUCKET in the app workflow).
+    Value: !Ref BundleBucket
+    Export:
+      Name: !Sub "${ResourcePrefix}-bundle-bucket-name"
+  BundleBucketArn:
+    Value: !GetAtt BundleBucket.Arn
+    Export:
+      Name: !Sub "${ResourcePrefix}-bundle-bucket-arn"
+  BundleObjectKey:
+    Description: S3 key of the deploy bundle (BUNDLE_KEY in the app workflow).
+    Value: !Ref BundleObjectKey
+    Export:
+      Name: !Sub "${ResourcePrefix}-bundle-object-key"
