@@ -167,6 +167,16 @@ Resources:
             Effect: Allow
             Action: s3:PutObject
             Resource: !Sub ${BundleBucket.Arn}/${BundleObjectKey}
+          # The bundle's taskdef.json is a copy of the latest task definition revision in ECS.
+          # The family is created later by stack 04-ecs, so its ARN is built from the naming convention.
+          - Sid: ReadTaskDefinitionTags
+            Effect: Allow
+            Action: ecs:ListTagsForResource
+            Resource: !Sub arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${ResourcePrefix}:*
+          - Sid: ReadTaskDefinitions # DescribeTaskDefinition supports no resource-level permissions
+            Effect: Allow
+            Action: ecs:DescribeTaskDefinition
+            Resource: "*"
 
   # Push access to this repository only.
   GitHubActionsPushPolicy:

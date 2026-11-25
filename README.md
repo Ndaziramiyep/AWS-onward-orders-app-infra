@@ -2,7 +2,7 @@
 
 Infrastructure for the **Onward Logistics order system**. This repo holds the CloudFormation templates that build the whole AWS environment: the network, load balancer, containers, auto scaling and release pipeline. **CloudFormation GitSync** keeps AWS in step with this repo. When a template changes on `main`, its stack updates itself.
 
-The application (Flask code, Dockerfile, CI workflows, and the deploy files `deploy/taskdef.yaml` and `deploy/appspec.yaml`) lives in a separate repo: **[AWS-onward-orders-app](https://github.com/Ndaziramiyep/AWS-onward-orders-app)**.
+The application (Flask code, Dockerfile, CI workflows, and the CodeDeploy AppSpec `deploy/appspec.yaml`) lives in a separate repo. Neither repo keeps the task definition the pipeline deploys: the app's CI generates `taskdef.json` from the latest revision registered in ECS. The app: **[AWS-onward-orders-app](https://github.com/Ndaziramiyep/AWS-onward-orders-app)**.
 
 ---
 
@@ -147,7 +147,7 @@ The ECS service (04) can't start without an image, so this has to happen before 
  E1  Developer merges to main in the app repo
  E2  test.yaml: pytest
  E3  build-push: OIDC login → build image → push :<sha>
- E4  make-bundle.sh: deploy/taskdef.yaml → taskdef.json, zip with appspec.yaml → upload to S3 bundle bucket
+ E4  make-bundle.sh: latest ECS task definition revision → taskdef.json, zip with appspec.yaml → upload to S3 bundle bucket
  E5  push :latest            ← last, so the run it starts reads this commit's bundle
  E6  ECR "PUSH latest" event → EventBridge rule → CodePipeline starts (no polling)
  E7  Pipeline Source: image URI from ECR + bundle from S3
@@ -227,7 +227,6 @@ AWS-onward-orders-app-infra/
 | `app/main.py`, `app/settings.py`, `app/templates/index.html`, `app/requirements.txt` | The Flask order app: `/` (order page, shows the task's AZ), `POST /orders`, `/health`, `/version`, and `/cpu` (burns CPU to demo auto scaling). `FORCE_UNHEALTHY` in `settings.py` makes `/health` fail, to test rollback. |
 | `tests/test_main.py` | Pytest suite, run on every PR and before every build |
 | `Dockerfile`, `.dockerignore` | Builds the image (Gunicorn on port 8080); the commit SHA is baked in as the app version |
-| `deploy/taskdef.yaml` | The task definition the pipeline deploys: CPU, memory, port, container health check, logs, role ARNs. `<IMAGE1_NAME>` is replaced with the exact image URI. Converted to `taskdef.json` in the bundle. |
 | `deploy/appspec.yaml` | CodeDeploy AppSpec: which container and port receive traffic. `<TASK_DEFINITION>` is filled in by the pipeline. |
 | `.github/workflows/test.yaml` | Runs the tests (on PRs, and called by build-push) |
 | `.github/workflows/build-push.yaml` | On push to `main`: test → build and push → wait for the release |
@@ -236,7 +235,7 @@ AWS-onward-orders-app-infra/
 | `.github/actions/aws-login/action.yaml` | Shared OIDC login step; holds the GitHub Actions role ARN |
 | `scripts/config.sh` | Shared settings: region, ECR repository, pipeline name, bundle bucket and key |
 | `scripts/build-push.sh` | Builds and pushes `:<sha>`, uploads the deploy bundle, then pushes `:latest` |
-| `scripts/make-bundle.sh` | Builds the deploy bundle zip for one commit (also handles old commits with root-level `taskdef.json`) |
+| `scripts/make-bundle.sh` | Builds the deploy bundle zip: `taskdef.json` generated from the latest ECS task definition revision (read-only fields removed, image set to `<IMAGE1_NAME>`) + the commit's `appspec.yaml` |
 | `scripts/wait-for-release.sh` | Polls the pipeline run for an image digest and exits with its result |
 | `scripts/rollback.sh` | Uploads an old commit's bundle, re-tags its image as `latest`, waits for the release |
 
@@ -345,7 +344,7 @@ Each section below gives the **problem** the stack solves, its **parameters** (t
 | `EcrRepository` | `ScanOnPush: true`, AES256, `IMMUTABLE_WITH_EXCLUSION` (only `latest` may move), lifecycle rules: expire untagged images after 1 day, keep the last 20 | Every image is scanned for vulnerabilities. A SHA tag such as `0cbc300` can never be overwritten, so it always means the same code, which makes rollback trustworthy. |
 | `GitHubActionsPushPolicy` | `ecr:GetAuthorizationToken` + push actions **on this one repository only** | Least privilege: CI can push images and nothing else. It cannot delete images, read secrets or touch ECS. |
 | `BundleBucket` (+ policy) | `onward-orders-lab-bundle-<account>-<region>`. Versioned, AES256, all public access blocked, HTTPS required. Old versions expire after 30 days (the newest 20 are always kept). | Holds the **deploy bundle**: a zip with `taskdef.json` and `appspec.yaml` at its root, uploaded by GitHub Actions. The pipeline's S3 source action requires versioning. It lives in 01, not 06, because the first image and bundle are pushed before stack 06 exists. |
-| `GitHubActionsBundlePolicy` | `s3:PutObject` on **one key only**: `deploy/bundle.zip` (`BundleObjectKey` parameter) | CI can replace the bundle and nothing else. It cannot read, list or delete objects. |
+| `GitHubActionsBundlePolicy` | `s3:PutObject` on **one key only**: `deploy/bundle.zip` (`BundleObjectKey` parameter), plus `ecs:DescribeTaskDefinition` (no resource-level support) and `ecs:ListTagsForResource` on this family's task definitions | CI can replace the bundle and read the task definition it copies into it, nothing else. It cannot read, list or delete objects. |
 | `GitHubActionsReleasePolicy` | Read-only `ListPipelineExecutions`, `GetPipelineExecution`, `GetPipelineState` on the release pipeline | Lets the app workflow wait for the AWS release and report its result. |
 | `GitHubActionsRole` | Trust condition on `aud` and `sub`, max session 1 hour | Only the right repo on the right branch can assume it. |
 
@@ -462,7 +461,7 @@ A detail worth explaining: a new security group allows **all outbound traffic by
 
 **Why `CODE_DEPLOY` as the controller:** with the default ECS controller, a new task definition triggers a rolling update. With `CODE_DEPLOY`, ECS refuses direct updates and waits for CodeDeploy to create a new *task set* in the other target group. That is what makes blue/green, canary and instant rollback possible.
 
-**Container health check:** the Docker-level health check (the console's *Health status* column) is defined in the **app repo's `deploy/taskdef.yaml`**, not here: `python -c "urllib.request.urlopen('http://127.0.0.1:8080/health')"` every 30 s. This bootstrap definition has none, so freshly created tasks show *Unknown* until the first pipeline release replaces them; after that they show *Healthy*.
+**Container health check:** the Docker-level health check (the console's *Health status* column) lives in the registered revisions of the family, which CI copies on every release: `python -c "urllib.request.urlopen('http://127.0.0.1:8080/health')"` every 30 s. This bootstrap definition has none. If the family ever starts again from the bootstrap revision alone (a new account), register a new revision of the `onward-orders-lab` family (e.g. ECS console → Task definitions → Create new revision) with the health check added; every later release keeps it.
 
 **Sizing:** 0.25 vCPU / 512 MiB is the smallest Fargate size. Gunicorn uses ~120 MiB. We scale **out** (more tasks) instead of **up** (bigger tasks), because more tasks also means more AZ redundancy.
 
@@ -509,7 +508,7 @@ A detail worth explaining: a new security group allows **all outbound traffic by
 
 **Why the pipeline reads two sources:** the image says *what* code to run; the task definition and AppSpec say *how* to run it (CPU, health check, port). The pipeline replaces `<IMAGE1_NAME>` in `taskdef.json` with the exact image URI and registers a new revision. CodeDeploy then deploys it according to `appspec.yaml`.
 
-**Why the deploy files come from S3, not from this template or from GitHub:** they belong to the app, so they live in the app repo (`deploy/taskdef.yaml`, `deploy/appspec.yaml`) and this template never names or contains them. On every push to `main`, the app's `scripts/build-push.sh` converts `taskdef.yaml` to JSON (the CodeDeployToECS action reads only JSON), zips it with `appspec.yaml`, and uploads the zip to the bundle bucket **before** it pushes `:latest`. The pipeline run that the `:latest` push starts therefore reads the bundle from the same commit as the image. The pipeline needs no GitHub connection; only GitSync uses one.
+**Why the deploy files come from S3, not from GitHub:** no repo holds the task definition; ECS does. The AppSpec belongs to the app and lives in the app repo (`deploy/appspec.yaml`). On every push to `main`, the app's `scripts/build-push.sh` copies the latest revision of the family into `taskdef.json` (read-only fields removed, image set to `<IMAGE1_NAME>`, tags kept), zips it with `appspec.yaml`, and uploads the zip to the bundle bucket **before** it pushes `:latest`. The pipeline run that the `:latest` push starts therefore reads a bundle built for that image. The pipeline needs no GitHub connection; only GitSync uses one.
 
 **Why `PollForSourceChanges: false` on the bundle:** a push to the app repo already produces a new image, which triggers the pipeline through EventBridge. If the bundle upload also triggered it, every merge would release twice.
 
@@ -602,7 +601,7 @@ The only human action was `git push`.
 
 Because SHA tags are immutable, `onward-orders-lab:234a874` is guaranteed to be the exact old code. In the app repo, open **Actions → rollback → Run workflow** on `main` and enter the commit, or run `./scripts/rollback.sh 234a874` locally. It:
 
-1. Builds the deploy bundle from **that commit's** `deploy/taskdef.yaml` and `deploy/appspec.yaml` and uploads it to the bundle bucket, so the old image runs with its own settings.
+1. Builds the deploy bundle from the **latest** task definition revision in ECS and **that commit's** `deploy/appspec.yaml` and uploads it to the bundle bucket. A rollback changes the image only, not the task settings.
 2. Points `latest` at the old image (re-puts its manifest; no layers move). The push event starts a normal blue/green release, with the same canary and alarm rollback.
 3. Waits for the release, like a normal ship.
 
@@ -610,7 +609,7 @@ Revert the bad commit on `main` too, or the next push ships it again.
 
 ### Example F: changing infrastructure
 
-To give tasks more memory: edit `TaskMemory: "1024"` in `deployments/04-ecs.deployment.yaml`, then PR → CI lint → merge. GitSync updates only the 04 stack. (For the *running* app, change `memory` in the app repo's `deploy/taskdef.yaml` instead, because CodeDeploy owns the live task definition. See [section 15](#15-things-a-new-engineer-must-know).)
+To give tasks more memory: edit `TaskMemory: "1024"` in `deployments/04-ecs.deployment.yaml`, then PR → CI lint → merge. GitSync updates only the 04 stack. (For the *running* app, register a new revision of the `onward-orders-lab` family (e.g. ECS console → Task definitions → Create new revision) with the new memory instead: the next release copies it, because CodeDeploy owns the live task definition. See [section 15](#15-things-a-new-engineer-must-know).)
 
 ---
 
@@ -677,7 +676,7 @@ Region `eu-west-1`, account `648637468459`, from the repo root with admin creden
 4. **ECS, autoscaling, delivery:** same as step 2 for `04-ecs`, `05-autoscaling`, `06-delivery`.
 5. Open the `LoadBalancerDnsName` output of the `03-alb` stack.
 
-The first image push happens before stack 06 exists, so it doesn't trigger a pipeline. The service runs that image from the bootstrap task definition. To prove the pipeline end to end immediately: `aws codepipeline start-pipeline-execution --name onward-orders-lab-pipeline`.
+The first image push happens before stack 06 exists, so it doesn't trigger a pipeline. The service runs that image from the bootstrap task definition. Stack 04 doesn't exist yet either, so that run uploads **no deploy bundle** (it logs a warning). Once 04 exists, re-run the app's `ci` workflow to upload one before starting the pipeline. To prove the pipeline end to end immediately: `aws codepipeline start-pipeline-execution --name onward-orders-lab-pipeline`.
 
 ---
 
@@ -711,7 +710,7 @@ eu-west-1, always on, 2 tasks, approximate list prices (details: [docs/cost-anal
 
 ## 15. Things a new engineer must know
 
-1. **CodeDeploy owns the service after creation.** Don't change `TaskDefinition` or `LoadBalancers` in `04-ecs.yaml`, or the listener default actions in `03-alb.yaml`. After a release, production may point at *green*, and a stack update would fight CodeDeploy. App and runtime changes ship through the app repo (`deploy/taskdef.yaml`, delivered in the S3 deploy bundle).
+1. **CodeDeploy owns the service after creation.** Don't change `TaskDefinition` or `LoadBalancers` in `04-ecs.yaml`, or the listener default actions in `03-alb.yaml`. After a release, production may point at *green*, and a stack update would fight CodeDeploy. App changes ship through the app repo; runtime settings through a new task definition revision in ECS. Both reach the pipeline in the S3 deploy bundle on the next app release.
 2. **Stack order matters.** Create 01 → 06, delete 06 → 01. Exports block wrong-order deletes.
 3. **Tasks stuck in PROVISIONING, or `CannotPullContainerError`,** almost always mean a missing endpoint (`ecr.api`, `ecr.dkr`, `logs`, S3 gateway) or `endpoint-sg` not allowing 443 from `task-sg`.
 4. **ECR tags:** SHA tags are immutable. Only `latest` can move, because `latest` is what the pipeline watches.
@@ -725,4 +724,4 @@ eu-west-1, always on, 2 tasks, approximate list prices (details: [docs/cost-anal
      --id <blocker-id> --resolved-reason "<what you fixed>"
    ```
    GitSync then retries the latest commit by itself.
-9. **The deploy files are app code, not infrastructure.** To change CPU, memory, the health check or environment variables of the running app, edit `deploy/taskdef.yaml` in the app repo. Stack 06 never names or contains these files; it only reads the bundle from S3.
+9. **The task definition lives in ECS, the AppSpec in the app repo.** To change CPU, memory, the health check or environment variables of the running app, register a new revision of the `onward-orders-lab` family (e.g. ECS console → Task definitions → Create new revision), then release the app (push to `main` or re-run its `ci` workflow): CI copies the latest revision, so it takes effect on that release. Stack 06 never names or contains these files; it only reads the bundle from S3.

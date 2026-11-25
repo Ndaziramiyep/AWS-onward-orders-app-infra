@@ -140,7 +140,9 @@ Resources:
         - Key: Name
           Value: !Sub "${ResourcePrefix}-task-role"
 
-  # Bootstrap revision only. CodeDeploy registers later revisions from the app repo's taskdef.json; do not edit to release.
+  # Bootstrap revision only; do not edit it to release. On every release the app's CI copies the
+  # latest revision of this family into taskdef.json (deploy bundle) and the pipeline registers the
+  # next revision from it.
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:

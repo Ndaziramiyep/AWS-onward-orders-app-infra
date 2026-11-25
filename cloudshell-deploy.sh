@@ -266,14 +266,16 @@ render_infra() {
   fi
 }
 
-# Renders the app repo's task definition, release settings (scripts/config.sh) and AWS login action.
+# Renders the app repo's release settings (scripts/config.sh) and AWS login action.
+# The app repo has no task definition: CI copies the latest revision in ECS into the deploy bundle.
 render_app() {
   local d="$1"
-  render_common "$d" deploy/taskdef.yaml scripts/config.sh .github/actions/aws-login/action.yaml \
+  render_common "$d" scripts/config.sh .github/actions/aws-login/action.yaml \
     '.github/workflows/*.yaml' README.md
   sed -i -e "s/\(ECR_REPOSITORY:-\)[^}]*/\1$PREFIX/" \
          -e "s/\(PIPELINE_NAME:-\)[^}]*/\1$PREFIX-pipeline/" \
-         -e "s/\(BUNDLE_BUCKET:-\)[^}]*/\1$PREFIX-bundle-$ACCOUNT_ID-$REGION/" "$d/scripts/config.sh"
+         -e "s/\(BUNDLE_BUCKET:-\)[^}]*/\1$PREFIX-bundle-$ACCOUNT_ID-$REGION/" \
+         -e "s/\(TASK_FAMILY:-\)[^}]*/\1$PREFIX/" "$d/scripts/config.sh"
   sed -i "s#role/[a-z0-9-]*-github-actions-role#role/$PREFIX-github-actions-role#" \
     "$d/.github/actions/aws-login/action.yaml"
 }
@@ -549,6 +551,18 @@ start_pipeline() {
   runs="$(aws codepipeline list-pipeline-executions --pipeline-name "$p" \
     --query 'length(pipelineExecutionSummaries)' --output text 2>/dev/null || echo 0)"
   if [[ "$runs" == 0 ]]; then
+    # The first image was pushed before stack 04-ecs existed, so CI could not build the deploy bundle
+    # (its taskdef.json is a copy of the latest task definition revision in ECS). Build and upload it here.
+    local bucket key app="$WORK_DIR/$APP_REPO"
+    bucket="$(stack_out "$PREFIX-01-foundation" BundleBucketName)"
+    key="$(stack_out "$PREFIX-01-foundation" BundleObjectKey)"
+    if ! aws s3api head-object --bucket "$bucket" --key "$key" >/dev/null 2>&1; then
+      (cd "$app" && ./scripts/make-bundle.sh HEAD "$WORK_DIR/bundle.zip") \
+        || die "Could not build the deploy bundle from $app."
+      aws s3 cp "$WORK_DIR/bundle.zip" "s3://$bucket/$key" --only-show-errors \
+        --metadata "commit=$(git -C "$app" rev-parse HEAD)"
+      ok "Uploaded the first deploy bundle to s3://$bucket/$key"
+    fi
     aws codepipeline start-pipeline-execution --name "$p" --query pipelineExecutionId --output text >/dev/null
     ok "Started first pipeline run (blue/green canary takes ~10-15 min)"
   else
