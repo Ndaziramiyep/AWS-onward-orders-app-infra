@@ -1,47 +1,5 @@
 #!/usr/bin/env bash
 # Onward Logistics - one-shot AWS CloudShell deployer.
-#
-# Builds the whole lab from the infra and app GitHub repos, in the only order that works:
-#
-#   1. Preflight        account, region, tools, GitHub token
-#   2. GitHub repos     make sure the infra and app repos exist
-#   3. Bootstrap        00-bootstrap stack (GitSync role + CodeConnections GitHub connection)
-#   4. Connection       wait for the one-time GitHub authorization (only manual console step)
-#   5. Publish infra    clone infra repo, render account/region/connection values, push if changed
-#   6. GitSync 01-03    foundation (OIDC, ECR), network (no NAT, endpoints), ALB
-#   7. Publish app      clone app repo, render, push -> GitHub Actions (OIDC) builds first image
-#   8. Wait for image   ECR :latest must exist before the private ECS service can start
-#   9. GitSync 04-06    ECS service, auto scaling, CodeDeploy/CodePipeline/EventBridge
-#
-# GitSync only updates stacks, so steps 6 and 9 create each missing stack once from its deployment
-# file, attach GitSync, and wait for it. After that, every change pushed to main is applied by GitSync.
-#  10. Verify           ALB responds, no NAT, no 0.0.0.0/0 in private routes, no inline policies
-#
-# Every step is idempotent: if CloudShell times out, run the script again.
-# Both repos are cloned fresh from GitHub, so push local edits before running.
-# A render commit may be pushed to either repo: 'git pull' your local clones afterwards.
-#
-# Usage (in AWS CloudShell):
-#   git clone https://github.com/<you>/AWS-onward-orders-app-infra.git && cd AWS-onward-orders-app-infra
-#   export GITHUB_TOKEN=<PAT: repo, workflow>   # optional for public repos (lets the script push/dispatch)
-#   bash cloudshell-deploy.sh            # full deploy (same as: deploy)
-#   bash cloudshell-deploy.sh publish    # only re-render and push both repos
-#   bash cloudshell-deploy.sh status     # stack status, URLs, last pipeline run
-#   bash cloudshell-deploy.sh verify     # run the security / HA checks again
-#   bash cloudshell-deploy.sh teardown   # delete stacks 06 -> 01 (idle costs nothing; 'deploy' rebuilds)
-#   Add -y to skip confirmation prompts.
-#
-# Overridable settings (export before running):
-#   AWS_REGION        default: CloudShell region, else eu-west-1
-#   PREFIX            default: onward-orders-lab   (must match the templates' ResourcePrefix)
-#   GITHUB_OWNER      default: owner of the GitHub token
-#   INFRA_REPO        default: AWS-onward-orders-app-infra
-#   APP_REPO          default: AWS-onward-orders-app
-#   BRANCH            default: main
-#   REPO_VISIBILITY   default: public              (public|private)
-#   CONNECTION_ARN    reuse an existing AVAILABLE CodeConnections GitHub connection
-#   START_PIPELINE    default: true  (release once through the pipeline to prove it end to end)
-#   KEEP_BOOTSTRAP    default: true  (teardown keeps the 00 bootstrap stack + GitHub connection)
 
 # Strict mode; any failure reports the line and stops.
 set -Eeuo pipefail
