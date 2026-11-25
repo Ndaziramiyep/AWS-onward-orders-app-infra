@@ -6,7 +6,6 @@ parameters:
   GitHubOrg: Ndaziramiyep
   AppRepo: AWS-onward-orders-app
   AppBranch: main
-  ShaImagesToKeep: "20"
 # Company-standard tags, propagated by GitSync to every taggable resource.
 tags:
   Project: onward-orders

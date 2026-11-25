@@ -1,4 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
+# Language extensions give Fn::ToJsonString, so the ECR lifecycle policy is written in YAML, not JSON.
+Transform: AWS::LanguageExtensions
 Description: >-
   Onward Logistics - 01 foundation. GitHub OIDC provider, the GitHub Actions role (ECR push and
   deploy-bundle upload only, trusted for the app repo main branch only), the private ECR
@@ -29,11 +31,6 @@ Parameters:
     Description: >-
       Leave empty to create the GitHub OIDC provider. An account can hold only one provider per
       URL, so if one already exists, paste its ARN here and it will be reused.
-  ShaImagesToKeep:
-    Type: Number
-    Default: 20
-    MinValue: 5
-    Description: Number of git-SHA tagged images kept in ECR for rollback.
   BundleObjectKey:
     Type: String
     Default: deploy/bundle.zip
@@ -56,9 +53,6 @@ Resources:
       Url: https://token.actions.githubusercontent.com
       ClientIdList:
         - sts.amazonaws.com
-      ThumbprintList:
-        - 6938fd4d98bab03faadb97b34396831e3780aea1
-        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
       Tags:
         - Key: Name
           Value: !Sub "${ResourcePrefix}-github-oidc"
@@ -78,23 +72,27 @@ Resources:
         - ImageTagMutabilityExclusionFilterType: WILDCARD
           ImageTagMutabilityExclusionFilterValue: latest
       LifecyclePolicy:
-        LifecyclePolicyText: !Sub |
-          {
-            "rules": [
-              {
-                "rulePriority": 1,
-                "description": "Expire untagged images after 1 day",
-                "selection": { "tagStatus": "untagged", "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 1 },
-                "action": { "type": "expire" }
-              },
-              {
-                "rulePriority": 2,
-                "description": "Keep the last ${ShaImagesToKeep} images for rollback",
-                "selection": { "tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": ${ShaImagesToKeep} },
-                "action": { "type": "expire" }
-              }
-            ]
-          }
+        # ECR requires integer counts, so 20 is written here directly (a parameter Ref would resolve to the string "20").
+        LifecyclePolicyText:
+          Fn::ToJsonString:
+            rules:
+              - rulePriority: 1
+                description: Expire untagged images after 1 day
+                selection:
+                  tagStatus: untagged
+                  countType: sinceImagePushed
+                  countUnit: days
+                  countNumber: 1
+                action:
+                  type: expire
+              - rulePriority: 2
+                description: Keep the last 20 images for rollback
+                selection:
+                  tagStatus: any
+                  countType: imageCountMoreThan
+                  countNumber: 20
+                action:
+                  type: expire
       Tags:
         - Key: Name
           Value: !Ref ResourcePrefix

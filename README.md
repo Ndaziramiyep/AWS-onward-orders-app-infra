@@ -337,7 +337,7 @@ Each section below gives the **problem** the stack solves, its **parameters** (t
 
 **Problem:** GitHub Actions must push images and deploy files to AWS **without stored access keys**, and both need a private, safe home.
 
-**Parameters:** `GitHubOrg`, `AppRepo`, `AppBranch` (who the role trusts), `ExistingOidcProviderArn` (reuse an existing provider), `ShaImagesToKeep` (20), `BundleObjectKey` (`deploy/bundle.zip`). **Imports:** nothing.
+**Parameters:** `GitHubOrg`, `AppRepo`, `AppBranch` (who the role trusts), `ExistingOidcProviderArn` (reuse an existing provider), `BundleObjectKey` (`deploy/bundle.zip`). **Imports:** nothing.
 
 | Resource | Key settings | Why |
 |---|---|---|

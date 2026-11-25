@@ -262,7 +262,7 @@ render_infra() {
   sed -i "s/^\(  S3PrefixListId:\) *[^ #]*/\1 $S3_PREFIX_LIST/" "$network"
 
   if [[ -n "$OIDC_REUSE_ARN" ]]; then
-    sed -i "/^  ShaImagesToKeep:/a\\  ExistingOidcProviderArn: $OIDC_REUSE_ARN" "$foundation"
+    sed -i "/^  AppBranch:/a\\  ExistingOidcProviderArn: $OIDC_REUSE_ARN" "$foundation"
   fi
 }
 
@@ -395,7 +395,7 @@ gitsync() {
       aws cloudformation deploy --stack-name "$stack" \
         --template-file "$WORK_DIR/$INFRA_REPO/$tpl" \
         --role-arn "$GITSYNC_ROLE_ARN" \
-        --capabilities CAPABILITY_NAMED_IAM \
+        --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
         --parameter-overrides "${params[@]}" \
         --tags "${tags[@]}" >/dev/null
     fi
